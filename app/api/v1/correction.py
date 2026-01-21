@@ -16,6 +16,9 @@ from app.schemas.correction import (
 )
 from app.services.zhipu import zhipu_service
 from app.utils.exceptions import ExternalAPIException
+import logging
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter()
 
@@ -213,6 +216,7 @@ async def submit_correction(
         )
 
     except Exception as e:
+        logger.exception("Correction failed")
         # Update status to failed
         correction.status = 2
         await db.commit()

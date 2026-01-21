@@ -7,6 +7,7 @@ Provides integration with Zhipu AI for:
 
 Documentation: https://docs.bigmodel.cn
 """
+
 import time
 import json
 import re
@@ -22,6 +23,7 @@ from app.config import settings
 @dataclass
 class CorrectionResult:
     """Result for a single question in homework correction"""
+
     index: int
     uuid: str
     question_text: Optional[str]
@@ -39,6 +41,7 @@ class CorrectionResult:
 @dataclass
 class CorrectionResponse:
     """Response from homework correction API"""
+
     trace_id: str
     image_id: str
     subject: Optional[str]
@@ -54,6 +57,7 @@ class CorrectionResponse:
 @dataclass
 class SolvingResponse:
     """Response from problem solving API"""
+
     answer: str
     course: Optional[str]
     knowledge_points: List[str]
@@ -97,17 +101,14 @@ class ZhipuService:
             payload,
             secret,
             algorithm="HS256",
-            headers={"alg": "HS256", "sign_type": "SIGN"}
+            headers={"alg": "HS256", "sign_type": "SIGN"},
         )
         return token
 
     def _get_headers(self) -> dict:
         """Get request headers with authentication"""
         token = self._get_auth_token()
-        return {
-            "Authorization": f"Bearer {token}",
-            "Content-Type": "application/json"
-        }
+        return {"Authorization": f"Bearer {token}", "Content-Type": "application/json"}
 
     async def _get_client(self) -> httpx.AsyncClient:
         """Get or create async HTTP client"""
@@ -141,14 +142,9 @@ class ZhipuService:
             "messages": [
                 {
                     "role": "user",
-                    "content": [
-                        {
-                            "type": "image_url",
-                            "image_url": image_url
-                        }
-                    ]
+                    "content": [{"type": "image_url", "image_url": image_url}],
                 }
-            ]
+            ],
         }
 
         response = await client.post(
@@ -160,7 +156,7 @@ class ZhipuService:
         result = response.json()
 
         # Check for errors
-        if result.get("code") != 200:
+        if (result.get("code") != 200) and (result.get("status") != "success"):
             raise Exception(f"Zhipu API error: {result}")
 
         data = result.get("data", {})
@@ -193,19 +189,21 @@ class ZhipuService:
             else:
                 correcting_count += 1
 
-            results.append(CorrectionResult(
-                index=item.get("index", 0),
-                uuid=item.get("uuid", ""),
-                question_text=item.get("question") or item.get("ocr_text"),
-                question_type=item.get("type"),
-                user_answer=item.get("user_answer"),
-                correct_answer=item.get("answer"),
-                is_correct=is_correct,
-                is_finish=is_finish,
-                question_bbox=item.get("question_bbox"),
-                answer_bbox=item.get("answer_bbox"),
-                correct_source=item.get("correct_source"),
-            ))
+            results.append(
+                CorrectionResult(
+                    index=item.get("index", 0),
+                    uuid=item.get("uuid", ""),
+                    question_text=item.get("question") or item.get("ocr_text"),
+                    question_type=item.get("type"),
+                    user_answer=item.get("user_answer"),
+                    correct_answer=item.get("answer"),
+                    is_correct=is_correct,
+                    is_finish=is_finish,
+                    question_bbox=item.get("question_bbox"),
+                    answer_bbox=item.get("answer_bbox"),
+                    correct_source=item.get("correct_source"),
+                )
+            )
 
         return CorrectionResponse(
             trace_id=trace_id,
@@ -277,8 +275,8 @@ class ZhipuService:
                 "trace_id": trace_id,
                 "image_id": image_id,
                 "uuids": uuids,
-                "images": []
-            }
+                "images": [],
+            },
         }
 
         response = await client.post(
@@ -317,8 +315,8 @@ class ZhipuService:
                 "question": question,
                 "image_id": image_id,
                 "uuid": uuid,
-                "trace_id": trace_id
-            }
+                "trace_id": trace_id,
+            },
         }
 
         async with client.stream(
@@ -339,7 +337,10 @@ class ZhipuService:
                                 messages = choice.get("messages", [])
                                 for msg in messages:
                                     content = msg.get("content", {})
-                                    if isinstance(content, dict) and content.get("type") == "text":
+                                    if (
+                                        isinstance(content, dict)
+                                        and content.get("type") == "text"
+                                    ):
                                         yield content.get("text", "")
                         except json.JSONDecodeError:
                             pass
@@ -377,12 +378,7 @@ class ZhipuService:
         data = {
             "agent_id": self.SOLVING_AGENT,
             "stream": False,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": content
-                }
-            ]
+            "messages": [{"role": "user", "content": content}],
         }
 
         # The API returns SSE format even for non-streaming
@@ -467,12 +463,7 @@ class ZhipuService:
         data = {
             "agent_id": self.SOLVING_AGENT,
             "stream": True,
-            "messages": [
-                {
-                    "role": "user",
-                    "content": content
-                }
-            ]
+            "messages": [{"role": "user", "content": content}],
         }
 
         async with client.stream(
@@ -492,7 +483,10 @@ class ZhipuService:
                                 messages = choice.get("messages", [])
                                 for msg in messages:
                                     content = msg.get("content", {})
-                                    if isinstance(content, dict) and content.get("type") == "text":
+                                    if (
+                                        isinstance(content, dict)
+                                        and content.get("type") == "text"
+                                    ):
                                         yield content.get("text", "")
                         except json.JSONDecodeError:
                             pass
