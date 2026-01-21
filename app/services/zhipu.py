@@ -57,10 +57,10 @@ class SolvingResponse:
     answer: str
     course: Optional[str]
     knowledge_points: List[str]
+    raw_response: dict
     question_text: Optional[str] = None
     analysis_text: Optional[str] = None
     final_answer: Optional[str] = None
-    raw_response: dict
 
 
 class ZhipuService:
