@@ -49,7 +49,6 @@ async def create_question_records(
             is_finish=result.is_finish,
             analysis=result.analysis,
             api_trace_id=correction_response.trace_id,
-            correct_source=result.correct_source,
         )
         db.add(question)
 
