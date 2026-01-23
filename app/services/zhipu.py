@@ -160,62 +160,56 @@ class ZhipuService:
             raise Exception(f"Zhipu API error: {result}")
 
         data = result.get("data", {})
-        trace_id = data.get("trace_id", "")
-        image_id = data.get("image_id", "")
-        processed_image_url = (
-            data.get("processed_image_url")
-            or data.get("result_image_url")
-            or data.get("mark_image_url")
-            or data.get("output_image_url")
-            or data.get("result_img_url")
-        )
-        results_raw = data.get("results", [])
+        try:
+            llm_result = data["choices"][0]["messages"][0]["content"]["object"]
+        except Exception as e:
+            raise Exception(f"Zhipu API error: {e}")
+        trace_id = llm_result.get("trace_id", "")
+        raw_response = llm_result.get("image_results", [None])[0]
 
-        # Parse results
+        processed_image_url = raw_response.get("processed_image_url", "")
+        subject = raw_response.get("paper_subject", "")
+
+        correct_count = raw_response.get("stat_result", {}).get("right", 0)
+        wrong_count = raw_response.get("stat_result", {}).get("wrong", 0)
+        correcting_count = raw_response.get("stat_result", {}).get("correcting", 0)
+
+        raw_results = raw_response.get("results", [])
+        user_answer = raw_results.get("answers", [None])[0]
+
         results = []
-        correct_count = 0
-        wrong_count = 0
-        correcting_count = 0
 
-        for item in results_raw:
+        for item in raw_results:
             is_correct = item.get("correct_result") == 1
             is_finish = item.get("is_finish") == 1
-
-            if is_finish:
-                if is_correct:
-                    correct_count += 1
-                else:
-                    wrong_count += 1
-            else:
-                correcting_count += 1
 
             results.append(
                 CorrectionResult(
                     index=item.get("index", 0),
                     uuid=item.get("uuid", ""),
-                    question_text=item.get("question") or item.get("ocr_text"),
+                    question_text=item.get("question") or item.get("text"),
                     question_type=item.get("type"),
-                    user_answer=item.get("user_answer"),
+                    user_answer=user_answer.get("text") if user_answer else None,
                     correct_answer=item.get("answer"),
                     is_correct=is_correct,
                     is_finish=is_finish,
-                    question_bbox=item.get("question_bbox"),
-                    answer_bbox=item.get("answer_bbox"),
+                    question_bbox=item.get("bbox"),
+                    answer_bbox=user_answer.get("bbox") if user_answer else None,
                     correct_source=item.get("correct_source"),
                 )
             )
 
         return CorrectionResponse(
             trace_id=trace_id,
-            image_id=image_id,
-            subject=data.get("paper_subject"),
+            image_id=llm_result.get("agent_id"),
+            subject=subject,
             processed_image_url=processed_image_url,
             total_questions=len(results),
             correct_count=correct_count,
             wrong_count=wrong_count,
             correcting_count=correcting_count,
             results=results,
-            raw_response=result,
+            raw_response=raw_results,
         )
 
     @staticmethod

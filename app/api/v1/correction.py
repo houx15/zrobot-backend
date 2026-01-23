@@ -47,6 +47,9 @@ async def create_question_records(
             answer_bbox=result.answer_bbox,
             correct_source=result.correct_source,
             is_finish=result.is_finish,
+            analysis=result.analysis,
+            api_trace_id=correction_response.trace_id,
+            correct_source=result.correct_source,
         )
         db.add(question)
 
@@ -84,6 +87,7 @@ async def update_knowledge_points(
             question_count=question_count,
         )
         db.add(record)
+
 
 async def create_study_record(
     db,
@@ -166,9 +170,11 @@ async def submit_correction(
 
         # 5. Get question detail IDs for response
         result = await db.execute(
-            select(QuestionHistory).where(
+            select(QuestionHistory)
+            .where(
                 QuestionHistory.correction_id == correction.id,
-            ).order_by(QuestionHistory.question_index)
+            )
+            .order_by(QuestionHistory.question_index)
         )
         questions = result.scalars().all()
 
