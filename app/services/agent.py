@@ -267,6 +267,18 @@ class AIAgent:
         """Clear interrupt flag"""
         await redis_client.delete(f"conv:interrupt:{conversation_id}")
 
+    async def _get_previous_response_id(self, conversation_id: int) -> Optional[str]:
+        return await redis_client.get(f"conv:llm:resp_id:{conversation_id}")
+
+    async def _set_previous_response_id(self, conversation_id: int, response_id: str) -> None:
+        if not response_id:
+            return
+        await redis_client.set(
+            f"conv:llm:resp_id:{conversation_id}",
+            response_id,
+            ex=7200,
+        )
+
     async def store_message(
         self,
         conversation_id: int,
@@ -377,12 +389,15 @@ class AIAgent:
 
         # Generate response
         full_response = ""
+        previous_response_id = await self._get_previous_response_id(conversation_id)
 
         try:
             async for chunk in self.llm.generate_with_context(
                 system_prompt=system_prompt,
                 user_message=user_text,
                 history=context.history,
+                previous_response_id=previous_response_id,
+                on_response_id=lambda rid: self._set_previous_response_id(conversation_id, rid),
                 interrupt_check=lambda: self.check_interrupt(conversation_id),
             ):
                 if chunk.content:
@@ -591,12 +606,15 @@ class AIAgent:
 
         # Generate response and parse segments
         full_response = ""
+        previous_response_id = await self._get_previous_response_id(conversation_id)
 
         try:
             async for chunk in self.llm.generate_with_context(
                 system_prompt=system_prompt,
                 user_message=text,
                 history=context.history,
+                previous_response_id=previous_response_id,
+                on_response_id=lambda rid: self._set_previous_response_id(conversation_id, rid),
                 interrupt_check=lambda: self.check_interrupt(conversation_id),
             ):
                 if chunk.content:
