@@ -86,6 +86,10 @@ async def finalize_conversation(
         question_text = ""
         if vars_data:
             question_text = vars_data.get("context_text", "")
+            # no more than 20 characters, center use ...
+            if len(question_text) > 20:
+                question_text = question_text[:10] + "..." + question_text[-10:]
+
         topic = question_text or topic or "答疑"
     elif not topic:
         topic = await summarize_conversation_topic(messages) or "AI对话"
