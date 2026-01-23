@@ -606,6 +606,7 @@ class AIAgent:
 
         # Generate response and parse segments
         full_response = ""
+        emitted_segments = 0
         previous_response_id = await self._get_previous_response_id(conversation_id)
 
         try:
@@ -643,6 +644,7 @@ class AIAgent:
                         if on_segment:
                             on_segment(segment)
                         yield segment
+                        emitted_segments += 1
 
                 if chunk.is_final:
                     break
@@ -663,6 +665,24 @@ class AIAgent:
                     if on_segment:
                         on_segment(final_segment)
                     yield final_segment
+                    emitted_segments += 1
+
+            # Fallback: if no segments were parsed, send full response as speech-only
+            if emitted_segments == 0 and full_response and not await self.check_interrupt(conversation_id):
+                fallback = Segment(
+                    segment_id=0,
+                    speech=full_response.strip(),
+                    board=":::note{color=yellow}\n未生成板书，以下为老师讲解\n:::",
+                )
+                try:
+                    audio_data = await self.tts.synthesize(fallback.speech)
+                    if audio_data:
+                        fallback.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                except Exception as e:
+                    logger.error(f"TTS error for fallback segment: {e}")
+                if on_segment:
+                    on_segment(fallback)
+                yield fallback
 
             # Store assistant message (full response)
             if full_response:

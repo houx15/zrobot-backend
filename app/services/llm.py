@@ -95,6 +95,7 @@ class LLMService:
         self,
         messages: List[Message],
         previous_response_id: Optional[str] = None,
+        instructions: Optional[str] = None,
     ) -> LLMResponse:
         if not self.api_key:
             logger.error("LLM service not configured")
@@ -107,6 +108,7 @@ class LLMService:
             model=self.model_id,
             input=input_payload,
             previous_response_id=previous_response_id,
+            instructions=instructions,
             thinking={"type": "disabled"},
         )
         data = self._response_to_dict(response)
@@ -123,6 +125,7 @@ class LLMService:
         max_tokens: int = 2048,
         top_p: float = 0.9,
         previous_response_id: Optional[str] = None,
+        instructions: Optional[str] = None,
     ) -> Optional[LLMResponse]:
         """
         Send chat completion request.
@@ -137,7 +140,11 @@ class LLMService:
             LLM response or None on error
         """
         try:
-            return await self._responses_create(messages, previous_response_id=previous_response_id)
+            return await self._responses_create(
+                messages,
+                previous_response_id=previous_response_id,
+                instructions=instructions,
+            )
 
         except Exception as e:
             logger.error(f"LLM chat error: {e}")
@@ -152,6 +159,7 @@ class LLMService:
         interrupt_check: Optional[Callable[[], bool]] = None,
         previous_response_id: Optional[str] = None,
         on_response_id: Optional[Callable[[str], Any]] = None,
+        instructions: Optional[str] = None,
     ) -> AsyncGenerator[StreamChunk, None]:
         """
         Stream chat completion response.
@@ -178,6 +186,7 @@ class LLMService:
             "previous_response_id": previous_response_id,
             "max_output_tokens": max_tokens,
             "thinking": {"type": "disabled"},
+            "instructions": instructions,
         }
 
         response_id_sent = False
@@ -286,8 +295,8 @@ class LLMService:
             for key, value in context_vars.items():
                 system_prompt = system_prompt.replace(f"{{{key}}}", value)
 
-        # Build message list
-        messages = [Message(role="system", content=system_prompt)]
+        # Build message list (system prompt goes into instructions)
+        messages: List[Message] = []
 
         # Add history
         if history:
@@ -300,6 +309,7 @@ class LLMService:
             messages,
             previous_response_id=previous_response_id,
             on_response_id=on_response_id,
+            instructions=system_prompt,
             **kwargs,
         ):
             yield chunk
