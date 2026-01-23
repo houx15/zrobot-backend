@@ -25,6 +25,7 @@ class HomeworkCorrectionHistory(Base):
     correcting_count: Mapped[Optional[int]] = mapped_column(Integer)
     raw_response: Mapped[Optional[dict]] = mapped_column(JSONB)
     api_trace_id: Mapped[Optional[str]] = mapped_column(String(100))
+    image_id: Mapped[Optional[str]] = mapped_column(String(100))
     status: Mapped[int] = mapped_column(SmallInteger, default=0, nullable=False)  # 0=processing, 1=done, 2=failed
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False

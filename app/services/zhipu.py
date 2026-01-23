@@ -173,6 +173,8 @@ class ZhipuService:
         wrong_count = raw_response.get("stat_result", {}).get("wrong", 0)
         correcting_count = raw_response.get("stat_result", {}).get("correcting", 0)
 
+        image_id = raw_response.get("image_id", "")
+
         raw_results = raw_response.get("results", [])
 
         results = []
@@ -190,7 +192,7 @@ class ZhipuService:
                 CorrectionResult(
                     index=item.get("index", 0),
                     uuid=item.get("uuid", ""),
-                    question_text=item.get("question") or item.get("text"),
+                    question_text=item.get("text") or item.get("question"),
                     question_type=item.get("type"),
                     user_answer=user_answer.get("text") if user_answer else None,
                     correct_answer=item.get("answer"),
@@ -204,7 +206,7 @@ class ZhipuService:
 
         return CorrectionResponse(
             trace_id=trace_id,
-            image_id=llm_result.get("agent_id"),
+            image_id=image_id,
             subject=subject,
             processed_image_url=processed_image_url,
             total_questions=len(results),
@@ -270,9 +272,12 @@ class ZhipuService:
             "agent_id": self.CORRECTION_POLLING_AGENT,
             "custom_variables": {
                 "trace_id": trace_id,
-                "image_id": image_id,
-                "uuids": uuids,
-                "images": [],
+                "images": [
+                    {
+                        "image_id": image_id,
+                        "uuids": uuids,
+                    }
+                ],
             },
         }
 
