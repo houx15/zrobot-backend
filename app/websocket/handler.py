@@ -44,17 +44,33 @@ async def verify_connection(
     # Decode token
     payload = decode_ws_token(token)
     if not payload:
+        logger.warning(
+            "[ws.verify] invalid token conv_id=%s token_prefix=%s",
+            conversation_id,
+            token[:12],
+        )
         await websocket.close(code=4001, reason="Invalid token")
         return None
 
     # Verify conversation_id matches
     if payload.get("conversation_id") != conversation_id:
+        logger.warning(
+            "[ws.verify] token conv_id mismatch url=%s token=%s user_id=%s",
+            conversation_id,
+            payload.get("conversation_id"),
+            payload.get("user_id"),
+        )
         await websocket.close(code=4002, reason="Token does not match conversation")
         return None
 
     # Check if conversation exists in Redis
     session = await redis_client.hgetall(f"conv:session:{conversation_id}")
     if not session:
+        logger.warning(
+            "[ws.verify] session missing conv_id=%s user_id=%s",
+            conversation_id,
+            payload.get("user_id"),
+        )
         await websocket.close(code=4003, reason="Conversation not found or expired")
         return None
 
@@ -62,11 +78,24 @@ async def verify_connection(
     session_user_id = int(session.get("user_id", 0))
     token_user_id = payload.get("user_id")
     if session_user_id != token_user_id:
+        logger.warning(
+            "[ws.verify] user mismatch conv_id=%s session_user_id=%s token_user_id=%s session=%s",
+            conversation_id,
+            session_user_id,
+            token_user_id,
+            session,
+        )
         await websocket.close(code=4004, reason="User mismatch")
         return None
 
     # Check conversation status
     if session.get("status") != "active":
+        logger.warning(
+            "[ws.verify] session not active conv_id=%s status=%s session=%s",
+            conversation_id,
+            session.get("status"),
+            session,
+        )
         await websocket.close(code=4005, reason="Conversation is not active")
         return None
 
