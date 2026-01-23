@@ -325,7 +325,7 @@ async def submit_correction(
                 )
             )
             pending_questions = result.scalars().all()
-            if uuids:
+            if pending_questions:
                 asyncio.create_task(
                     _poll_and_update_async(
                         correction_id=correction.id,
