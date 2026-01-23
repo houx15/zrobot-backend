@@ -11,6 +11,8 @@ class SolvingRequest(BaseModel):
 class SolvingData(BaseModel):
     """Problem solving response data"""
     question_history_id: int
+    image_url: Optional[str] = None
+    question_text: Optional[str] = None
 
 
 class SolvingHistoryItem(BaseModel):

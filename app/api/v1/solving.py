@@ -102,6 +102,8 @@ async def submit_solving(
         return BaseResponse.success(
             data=SolvingData(
                 question_history_id=question.id,
+                image_url=question.question_image_url,
+                question_text=question.question_text,
             )
         )
 
