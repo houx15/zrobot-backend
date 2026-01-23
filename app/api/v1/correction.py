@@ -94,11 +94,25 @@ async def create_study_record(
     correction_id: int,
     subject: Optional[str],
     correct_count: int,
-    total: int,
+    wrong_count: int,
 ):
     """Create study record for the correction activity"""
+    subject_map = {
+        "math": "数学",
+        "mathematics": "数学",
+        "english": "英语",
+        "chinese": "语文",
+        "physics": "物理",
+        "chemistry": "化学",
+        "biology": "生物",
+        "history": "历史",
+        "geography": "地理",
+        "politics": "政治",
+    }
+    subject_label = subject_map.get((subject or "").lower(), subject or "")
+    total = correct_count + wrong_count
     accuracy = int(correct_count / total * 100) if total > 0 else 0
-    abstract = f"批改{subject or ''}作业，正确率{accuracy}%"
+    abstract = f"批改{subject_label}作业，正确率{accuracy}%"
 
     record = StudyRecord(
         user_id=user_id,
@@ -205,13 +219,14 @@ async def submit_correction(
             correction.id,
             correction_response.subject,
             correction_response.correct_count,
-            correction_response.correct_count + correction_response.wrong_count,
+            correction_response.wrong_count,
         )
         await db.commit()
 
         return BaseResponse.success(
             data=CorrectionSubmitData(
                 correction_id=correction.id,
+                image_url=correction.image_url,
                 processed_image_url=correction.processed_image_url,
                 subject=correction.subject,
                 total_questions=correction.total_questions or 0,

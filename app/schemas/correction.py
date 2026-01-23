@@ -23,6 +23,7 @@ class QuestionResult(BaseModel):
 class CorrectionSubmitData(BaseModel):
     """Correction submit response data"""
     correction_id: int
+    image_url: str
     processed_image_url: Optional[str] = None
     subject: Optional[str] = None
     total_questions: int
