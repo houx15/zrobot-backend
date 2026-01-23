@@ -178,7 +178,11 @@ class ZhipuService:
         results = []
 
         for item in raw_results:
-            user_answer = item.get("answers", [None])[0]
+            user_answer = item.get("answers", [])
+            if user_answer:
+                user_answer = user_answer[0]
+            else:
+                user_answer = None
             is_correct = item.get("correct_result") == 1
             is_finish = item.get("is_finish") == 1
 
