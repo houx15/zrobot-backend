@@ -25,7 +25,7 @@ router = APIRouter()
 async def create_study_record_for_solving(
     db,
     user_id: int,
-    solving_id: int,
+    question_history_id: int,
 ):
     """Create study record for the solving activity"""
     record = StudyRecord(
@@ -35,7 +35,7 @@ async def create_study_record_for_solving(
         end_time=datetime.now(timezone.utc),
         duration=30,  # Estimated duration
         abstract="拍照答疑",
-        related_id=solving_id,
+        related_id=question_history_id,
         related_type="solving",
         status=1,
     )
@@ -173,7 +173,7 @@ async def submit_solving_stream(
                     )
                     await session.commit()
 
-            yield f"data: {json.dumps({'done': True, 'solving_id': question.id}, ensure_ascii=False)}\n\n"
+            yield f"data: {json.dumps({'done': True, 'question_history_id': question.id}, ensure_ascii=False)}\n\n"
 
         except Exception as e:
             yield f"data: {json.dumps({'error': str(e)}, ensure_ascii=False)}\n\n"

@@ -9,7 +9,7 @@ from enum import Enum
 class ClientMessageType(str, Enum):
     """Client to server message types"""
     AUDIO = "audio"
-    TEXT = "text"
+    END_SPEAKING = "end_speaking"
     IMAGE = "image"
     INTERRUPT = "interrupt"
     PING = "ping"
@@ -19,30 +19,26 @@ class ServerMessageType(str, Enum):
     """Server to client message types"""
     AUDIO = "audio"
     TRANSCRIPT = "transcript"
-    REPLY_TEXT = "reply_text"
-    REPLY_START = "reply_start"
-    REPLY_END = "reply_end"
+    SEGMENT = "segment"  # New: speech + board segment
+    STATE = "state"  # Conversation state update
+    DONE = "done"
     ERROR = "error"
     PONG = "pong"
-    CONNECTED = "connected"
-    DISCONNECTED = "disconnected"
+
+
+class ConversationState(str, Enum):
+    """Conversation state machine states"""
+    IDLE = "idle"
+    LISTENING = "listening"
+    PROCESSING = "processing"
+    SPEAKING = "speaking"
 
 
 # Client -> Server message data models
 class AudioData(BaseModel):
     """Audio message data"""
-    audio: str  # base64 encoded opus data
-    is_final: bool = False
-
-
-class TextData(BaseModel):
-    """Text message data"""
-    content: str
-
-
-class ImageData(BaseModel):
-    """Image message data"""
-    image_url: str
+    audio: str  # base64 encoded PCM s16le (16kHz, mono)
+    sequence: int
 
 
 class ClientMessage(BaseModel):
@@ -56,27 +52,27 @@ class ClientMessage(BaseModel):
             return AudioData(**self.data)
         return None
 
-    def get_text_data(self) -> Optional[TextData]:
-        if self.type == ClientMessageType.TEXT and self.data:
-            return TextData(**self.data)
-        return None
-
-    def get_image_data(self) -> Optional[ImageData]:
+    def get_image_data(self) -> Optional["ImageData"]:
         if self.type == ClientMessageType.IMAGE and self.data:
             return ImageData(**self.data)
         return None
 
 
+class ImageData(BaseModel):
+    """Image message data"""
+    image_url: str
+
 # Server -> Client message data models
 class ServerAudioData(BaseModel):
     """Server audio response data"""
-    audio: str  # base64 encoded opus data
+    audio: str  # base64 encoded audio (mp3)
+    segment_id: int
     is_final: bool = False
 
 
 class TranscriptData(BaseModel):
     """ASR transcript data"""
-    content: str
+    text: str
     is_final: bool = False
 
 
@@ -84,6 +80,19 @@ class ReplyTextData(BaseModel):
     """LLM reply text data"""
     content: str
     is_final: bool = False
+
+
+class SegmentData(BaseModel):
+    """Speech + Board segment data"""
+    segment_id: int
+    speech: str  # Speech text for TTS
+    board: str  # Board markup content
+    # audio is sent separately via ServerMessage.audio
+
+
+class StateChangeData(BaseModel):
+    """Conversation state change data"""
+    state: str  # idle, listening, processing, speaking
 
 
 class ErrorData(BaseModel):
@@ -96,7 +105,7 @@ class ServerMessage(BaseModel):
     """Generic server message structure"""
     type: ServerMessageType
     data: Optional[dict] = None
-    timestamp: str = None
+    timestamp: Optional[str] = None
 
     def __init__(self, **kwargs):
         if "timestamp" not in kwargs or kwargs["timestamp"] is None:
@@ -104,11 +113,20 @@ class ServerMessage(BaseModel):
         super().__init__(**kwargs)
 
     @classmethod
-    def audio(cls, audio_data: str, is_final: bool = False) -> "ServerMessage":
+    def audio(
+        cls,
+        audio_data: str,
+        segment_id: int,
+        is_final: bool = False,
+    ) -> "ServerMessage":
         """Create audio message"""
         return cls(
             type=ServerMessageType.AUDIO,
-            data={"audio": audio_data, "is_final": is_final},
+            data={
+                "audio": audio_data,
+                "segment_id": segment_id,
+                "is_final": is_final,
+            },
         )
 
     @classmethod
@@ -116,26 +134,41 @@ class ServerMessage(BaseModel):
         """Create transcript message"""
         return cls(
             type=ServerMessageType.TRANSCRIPT,
-            data={"content": content, "is_final": is_final},
+            data={"text": content, "is_final": is_final},
         )
 
     @classmethod
-    def reply_text(cls, content: str, is_final: bool = False) -> "ServerMessage":
-        """Create reply text message"""
+    def segment(
+        cls,
+        segment_id: int,
+        speech: str,
+        board: str,
+    ) -> "ServerMessage":
+        """Create segment message with speech + board content"""
         return cls(
-            type=ServerMessageType.REPLY_TEXT,
-            data={"content": content, "is_final": is_final},
+            type=ServerMessageType.SEGMENT,
+            data={
+                "segment_id": segment_id,
+                "speech": speech,
+                "board": board,
+            },
         )
 
     @classmethod
-    def reply_start(cls) -> "ServerMessage":
-        """Create reply start message"""
-        return cls(type=ServerMessageType.REPLY_START, data={})
+    def state(cls, state: str) -> "ServerMessage":
+        """Create state message"""
+        return cls(
+            type=ServerMessageType.STATE,
+            data={"state": state},
+        )
 
     @classmethod
-    def reply_end(cls) -> "ServerMessage":
-        """Create reply end message"""
-        return cls(type=ServerMessageType.REPLY_END, data={})
+    def done(cls, total_segments: int) -> "ServerMessage":
+        """Create done message"""
+        return cls(
+            type=ServerMessageType.DONE,
+            data={"total_segments": total_segments},
+        )
 
     @classmethod
     def error(cls, code: int, message: str) -> "ServerMessage":
@@ -149,19 +182,3 @@ class ServerMessage(BaseModel):
     def pong(cls) -> "ServerMessage":
         """Create pong message"""
         return cls(type=ServerMessageType.PONG, data={})
-
-    @classmethod
-    def connected(cls, conversation_id: int) -> "ServerMessage":
-        """Create connected message"""
-        return cls(
-            type=ServerMessageType.CONNECTED,
-            data={"conversation_id": conversation_id},
-        )
-
-    @classmethod
-    def disconnected(cls, reason: str = "") -> "ServerMessage":
-        """Create disconnected message"""
-        return cls(
-            type=ServerMessageType.DISCONNECTED,
-            data={"reason": reason},
-        )

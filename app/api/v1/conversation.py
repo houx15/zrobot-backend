@@ -52,15 +52,18 @@ async def finalize_conversation(
     for msg_str in messages_raw:
         try:
             import json
+
             messages.append(json.loads(msg_str))
         except Exception:
             continue
 
     # Session metadata
     session = await redis.hgetall(f"conv:session:{conversation.id}")
+    vars_data = await redis.hgetall(f"conv:vars:{conversation.id}")
     started_at = session.get("started_at") if session else None
 
     from dateutil.parser import parse
+
     if started_at:
         try:
             start_time = parse(started_at)
@@ -79,7 +82,12 @@ async def finalize_conversation(
 
     # Summarize conversation topic using LLM
     topic = conversation.topic
-    if not topic:
+    if conversation.type == "solving":
+        question_text = ""
+        if vars_data:
+            question_text = vars_data.get("context_text", "")
+        topic = question_text or topic or "答疑"
+    elif not topic:
         topic = await summarize_conversation_topic(messages) or "AI对话"
 
     # Update conversation record
@@ -90,6 +98,13 @@ async def finalize_conversation(
     conversation.ended_at = datetime.now(timezone.utc)
     conversation.status = "ended"
 
+    # Build abstract for study record
+    abstract = "AI对话"
+    if conversation.type == "solving":
+        abstract = f"答疑-{topic}" if topic else "答疑"
+    else:
+        abstract = f"问答-{topic}" if topic else "问答"
+
     # Write study record
     action = "chat" if conversation.type == "chat" else "tutoring"
     record = StudyRecord(
@@ -98,7 +113,7 @@ async def finalize_conversation(
         start_time=start_time,
         end_time=conversation.ended_at,
         duration=duration,
-        abstract=f"AI对话：{topic}",
+        abstract=abstract,
         related_id=conversation.id,
         related_type="conversation",
         status=1,
@@ -216,6 +231,8 @@ async def create_conversation(
         if not question:
             raise NotFoundException("题目不存在")
 
+        question.conversation_id = conversation.id
+
         context_vars["context_text"] = question.question_text or ""
         context_vars["context_image_url"] = question.question_image_url or ""
         if question.subject:
@@ -224,6 +241,8 @@ async def create_conversation(
             context_vars["user_answer"] = question.user_answer
         if question.correct_answer:
             context_vars["correct_answer"] = question.correct_answer
+        if question.analysis:
+            context_vars["analysis"] = question.analysis
         context_vars["question_history_id"] = str(question.id)
 
     if current_user.nickname:
@@ -233,6 +252,7 @@ async def create_conversation(
     if context_vars:
         await redis.hmset(f"conv:vars:{conversation.id}", context_vars)
         await redis.expire(f"conv:vars:{conversation.id}", WS_TOKEN_EXPIRE_SECONDS)
+        await db.commit()
 
     # Add to active set
     await redis.sadd("conv:active_set", str(conversation.id))
@@ -356,7 +376,9 @@ async def get_conversation_history(
     )
 
 
-@router.get("/detail/{conversation_id}", response_model=BaseResponse[ConversationDetailData])
+@router.get(
+    "/detail/{conversation_id}", response_model=BaseResponse[ConversationDetailData]
+)
 async def get_conversation_detail(
     conversation_id: int = Path(..., description="对话会话ID"),
     current_user: CurrentUser = None,

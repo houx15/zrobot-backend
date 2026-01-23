@@ -24,7 +24,7 @@ def client() -> Generator[httpx.Client, None, None]:
         yield session
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def auth_token(client: httpx.Client, base_url: str) -> str:
     if os.getenv("RUN_INTEGRATION") != "1":
         pytest.skip("Set RUN_INTEGRATION=1 to run integration tests.")
@@ -43,6 +43,6 @@ def auth_token(client: httpx.Client, base_url: str) -> str:
     return payload["data"]["token"]
 
 
-@pytest.fixture(scope="session")
+@pytest.fixture(scope="function")
 def auth_headers(auth_token: str) -> dict:
     return {"Authorization": f"Bearer {auth_token}"}

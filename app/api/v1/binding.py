@@ -46,7 +46,7 @@ async def get_binding_qrcode(
     )
 
     # Generate the binding URL (this would be a deep link for the parent app)
-    binding_url = f"https://your-domain.com/binding?code={qrcode_id}"
+    binding_url = f"https://parent.uni-robot.cn/binding?code={qrcode_id}"
 
     # Generate QR code image and get URL
     qrcode_url = await qrcode_service.generate_and_upload_qrcode(

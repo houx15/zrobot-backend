@@ -14,6 +14,7 @@ from app.websocket.protocol import (
     ClientMessage,
     ClientMessageType,
     ServerMessage,
+    ConversationState,
 )
 from app.utils.security import decode_ws_token
 from app.redis_client import redis_client
@@ -21,8 +22,13 @@ from app.services.agent import ai_agent
 
 logger = logging.getLogger(__name__)
 
-# Audio buffer for streaming ASR (conversation_id -> list of audio chunks)
-audio_buffers: Dict[int, list] = defaultdict(list)
+# Streaming ASR session state per conversation
+asr_queues: Dict[int, asyncio.Queue] = {}
+asr_tasks: Dict[int, asyncio.Task] = {}
+interrupt_flags: Dict[int, bool] = defaultdict(bool)
+listening_since: Dict[int, Optional[datetime]] = {}  # Track when entered LISTENING state
+IDLE_TIMEOUT_SECONDS = 60
+LISTENING_TIMEOUT_SECONDS = 60  # End conversation if no audio for 1 minute in LISTENING state
 
 
 async def verify_connection(
@@ -95,6 +101,25 @@ async def store_message(
     )
 
 
+async def send_state_change(conversation_id: int, state: ConversationState) -> None:
+    """Send state change message to client"""
+    await connection_manager.send_message(
+        conversation_id,
+        ServerMessage.state(state.value),
+    )
+    # Also update Redis session state
+    await redis_client.hset(
+        f"conv:session:{conversation_id}",
+        "state",
+        state.value,
+    )
+    # Track when we enter LISTENING state for timeout detection
+    if state == ConversationState.LISTENING:
+        listening_since[conversation_id] = datetime.now(timezone.utc)
+    else:
+        listening_since.pop(conversation_id, None)
+
+
 async def handle_ping(
     conversation_id: int,
 ) -> ServerMessage:
@@ -108,50 +133,63 @@ async def handle_text_message(
     content: str,
 ) -> None:
     """
-    Handle text message from client.
+    Handle text message from client using segment-based protocol.
 
     Flow:
-    1. Store the message
-    2. Call LLM service for response
-    3. Stream TTS audio response back
+    1. State: processing
+    2. Call LLM service, parse [S]...[/S][B]...[/B] segments
+    3. For each segment: generate TTS, send segment + audio, state: speaking
+    4. State: idle
     """
     await update_last_active(conversation_id)
 
-    # Send reply start
-    await connection_manager.send_message(
-        conversation_id,
-        ServerMessage.reply_start(),
-    )
+    # Send processing state
+    await send_state_change(conversation_id, ConversationState.PROCESSING)
+
+    segment_count = 0
 
     try:
-        # Process through AI agent (LLM + TTS)
-        async for response in ai_agent.process_text_input(
+        # Process through AI agent with segment-based pipeline
+        async for segment in ai_agent.process_text_with_segments(
             conversation_id,
             content,
-            on_reply_text=None,  # We'll handle text streaming below
-            on_reply_audio=None,
         ):
             # Check for interrupt
             if await check_interrupt(conversation_id):
-                logger.info(f"Text response interrupted for conversation {conversation_id}")
+                logger.info(f"Segment response interrupted for conversation {conversation_id}")
                 break
 
-            # Send text chunk
-            if response.text:
+            # Update state to speaking when sending first segment
+            if segment_count == 0:
+                await send_state_change(conversation_id, ConversationState.SPEAKING)
+
+            # Send segment message
+            await connection_manager.send_message(
+                conversation_id,
+                ServerMessage.segment(
+                    segment_id=segment.segment_id,
+                    speech=segment.speech,
+                    board=segment.board,
+                ),
+            )
+
+            if segment.audio_base64:
                 await connection_manager.send_message(
                     conversation_id,
-                    ServerMessage.reply_text(response.text, is_final=response.is_final),
+                    ServerMessage.audio(
+                        audio_data=segment.audio_base64,
+                        segment_id=segment.segment_id,
+                        is_final=True,
+                    ),
                 )
 
-            # Send audio chunk
-            if response.audio_base64:
-                await connection_manager.send_message(
-                    conversation_id,
-                    ServerMessage.audio(response.audio_base64, is_final=response.is_final),
-                )
+            segment_count += 1
 
-            if response.is_final:
-                break
+        # Send done marker
+        await connection_manager.send_message(
+            conversation_id,
+            ServerMessage.done(total_segments=segment_count),
+        )
 
     except Exception as e:
         logger.error(f"Error processing text message: {e}")
@@ -160,71 +198,42 @@ async def handle_text_message(
             ServerMessage.error(5001, f"处理消息时出错: {str(e)}"),
         )
 
-    # Send reply end
-    await connection_manager.send_message(
-        conversation_id,
-        ServerMessage.reply_end(),
-    )
+    # Send idle state
+    await send_state_change(conversation_id, ConversationState.IDLE)
 
 
 async def handle_audio_message(
     conversation_id: int,
     audio_data: str,
-    is_final: bool,
+    sequence: int,
 ) -> None:
     """
-    Handle audio message from client.
+    Handle audio message from client using segment-based protocol.
 
     Flow:
-    1. Buffer audio chunks
-    2. When final, send to ASR for transcription
-    3. Send transcription to LLM
-    4. Stream TTS audio response back
+    1. State: listening (when receiving first chunk)
+    2. Stream audio chunks to ASR
+    3. Emit partial transcripts while speaking
+    4. On end_speaking, finalize ASR and send to LLM
+    5. State: idle
     """
     await update_last_active(conversation_id)
 
     try:
         # Decode base64 audio data
-        audio_bytes = base64.b64decode(audio_data)
-
-        # Add to buffer
-        audio_buffers[conversation_id].append(audio_bytes)
-
-        if is_final:
-            # Combine all buffered audio
-            full_audio = b"".join(audio_buffers[conversation_id])
-            audio_buffers[conversation_id].clear()
-
-            if not full_audio:
-                return
-
-            # Transcribe audio
-            transcribed_text = await ai_agent.asr.transcribe(full_audio)
-
-            if not transcribed_text:
-                await connection_manager.send_message(
-                    conversation_id,
-                    ServerMessage.transcript("(无法识别语音)", is_final=True),
-                )
-                return
-
-            # Send transcript
-            await connection_manager.send_message(
-                conversation_id,
-                ServerMessage.transcript(transcribed_text, is_final=True),
-            )
-
-            # Process transcribed text through LLM + TTS
-            await handle_text_message(conversation_id, transcribed_text)
+        pcm_bytes = base64.b64decode(audio_data)
+        queue = await ensure_asr_session(conversation_id)
+        # Sequence is accepted for client ordering but ASR streaming uses arrival order.
+        await queue.put(pcm_bytes)
 
     except Exception as e:
         logger.error(f"Error processing audio message: {e}")
-        # Clear buffer on error
-        audio_buffers[conversation_id].clear()
+        await stop_asr_session(conversation_id)
         await connection_manager.send_message(
             conversation_id,
             ServerMessage.error(5001, f"音频处理出错: {str(e)}"),
         )
+        await send_state_change(conversation_id, ConversationState.IDLE)
 
 
 async def handle_image_message(
@@ -241,7 +250,7 @@ async def handle_image_message(
     # Store image in context vars
     await redis_client.hset(
         f"conv:vars:{conversation_id}",
-        "last_image_url",
+        "context_image_url",
         image_url,
     )
 
@@ -258,6 +267,7 @@ async def handle_interrupt(conversation_id: int) -> None:
     2. Clear audio buffer
     3. Cancel any ongoing TTS playback
     4. Cancel any pending LLM generation
+    5. Reset state to idle
     """
     logger.info(f"Interrupt received for conversation {conversation_id}")
 
@@ -267,9 +277,9 @@ async def handle_interrupt(conversation_id: int) -> None:
         "1",
         ex=10,  # Expire after 10 seconds
     )
+    interrupt_flags[conversation_id] = True
 
-    # Clear audio buffer
-    audio_buffers[conversation_id].clear()
+    await stop_asr_session(conversation_id)
 
     # Update session state
     await redis_client.hset(
@@ -278,11 +288,19 @@ async def handle_interrupt(conversation_id: int) -> None:
         "false",
     )
 
-    # Send reply end to signal interruption complete
-    await connection_manager.send_message(
-        conversation_id,
-        ServerMessage.reply_end(),
-    )
+    # Reset to listening state so the user can continue speaking
+    await send_state_change(conversation_id, ConversationState.LISTENING)
+
+
+async def handle_end_speaking(conversation_id: int) -> None:
+    """Handle end of speaking signal, finalize ASR stream."""
+    await update_last_active(conversation_id)
+
+    queue = asr_queues.get(conversation_id)
+    if not queue:
+        await send_state_change(conversation_id, ConversationState.IDLE)
+        return
+    await queue.put(None)
 
 
 async def check_interrupt(conversation_id: int) -> bool:
@@ -294,6 +312,93 @@ async def check_interrupt(conversation_id: int) -> bool:
 async def clear_interrupt(conversation_id: int) -> None:
     """Clear interrupt flag"""
     await redis_client.delete(f"conv:interrupt:{conversation_id}")
+    interrupt_flags[conversation_id] = False
+
+
+async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
+    """Ensure an ASR streaming session exists for this conversation."""
+    task = asr_tasks.get(conversation_id)
+    if task and not task.done():
+        return asr_queues[conversation_id]
+
+    await clear_interrupt(conversation_id)
+    queue: asyncio.Queue = asyncio.Queue()
+    asr_queues[conversation_id] = queue
+    interrupt_flags[conversation_id] = False
+    await send_state_change(conversation_id, ConversationState.LISTENING)
+
+    async def audio_generator():
+        while True:
+            chunk = await queue.get()
+            if chunk is None:
+                break
+            yield chunk
+
+    async def asr_worker():
+        final_text = ""
+        try:
+            async for result in ai_agent.asr.transcribe_stream(
+                audio_generator(),
+                interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
+            ):
+                await connection_manager.send_message(
+                    conversation_id,
+                    ServerMessage.transcript(result.text, is_final=result.is_final),
+                )
+                if result.is_final:
+                    final_text = result.text
+
+            if final_text:
+                await handle_text_message(conversation_id, final_text)
+            else:
+                await connection_manager.send_message(
+                    conversation_id,
+                    ServerMessage.transcript("(无法识别语音)", is_final=True),
+                )
+                await send_state_change(conversation_id, ConversationState.IDLE)
+        except Exception as e:
+            logger.error(f"ASR streaming error: {e}")
+            await connection_manager.send_message(
+                conversation_id,
+                ServerMessage.error(5001, f"语音识别出错: {str(e)}"),
+            )
+            await send_state_change(conversation_id, ConversationState.IDLE)
+        finally:
+            current_task = asyncio.current_task()
+            if asr_tasks.get(conversation_id) is current_task:
+                asr_tasks.pop(conversation_id, None)
+                asr_queues.pop(conversation_id, None)
+
+    asr_tasks[conversation_id] = asyncio.create_task(asr_worker())
+    return queue
+
+
+async def stop_asr_session(conversation_id: int) -> None:
+    """Stop any active ASR streaming session."""
+    queue = asr_queues.get(conversation_id)
+    if queue:
+        await queue.put(None)
+    task = asr_tasks.get(conversation_id)
+    if task and not task.done():
+        task.cancel()
+        try:
+            await task
+        except asyncio.CancelledError:
+            pass
+
+
+def check_listening_timeout(conversation_id: int) -> bool:
+    """
+    Check if we've been in LISTENING state for too long without audio.
+
+    Returns True if timeout exceeded, False otherwise.
+    """
+    started = listening_since.get(conversation_id)
+    if started is None:
+        return False
+
+    elapsed = (datetime.now(timezone.utc) - started).total_seconds()
+    return elapsed > LISTENING_TIMEOUT_SECONDS
 
 
 async def websocket_endpoint(
@@ -307,8 +412,8 @@ async def websocket_endpoint(
     URL: /ws/conversation/{conversation_id}?token={token}
 
     Message Protocol:
-    - Client sends JSON: {"type": "audio|text|image|interrupt|ping", "data": {...}}
-    - Server sends JSON: {"type": "audio|transcript|reply_text|reply_start|reply_end|error|pong", "data": {...}}
+    - Client sends JSON: {"type": "audio|end_speaking|image|interrupt|ping", "data": {...}}
+    - Server sends JSON: {"type": "state|transcript|segment|audio|done|error|pong", "data": {...}}
     """
     # Verify token and get user_id
     user_id = await verify_connection(websocket, conversation_id, token)
@@ -318,17 +423,20 @@ async def websocket_endpoint(
     # Accept connection and register
     await connection_manager.connect(websocket, conversation_id, user_id)
 
-    # Send connected confirmation
-    await connection_manager.send_message(
-        conversation_id,
-        ServerMessage.connected(conversation_id),
-    )
+    # Send initial idle state
+    await send_state_change(conversation_id, ConversationState.IDLE)
 
     try:
         while True:
             # Receive message
             try:
-                data = await websocket.receive_json()
+                data = await asyncio.wait_for(
+                    websocket.receive_json(),
+                    timeout=IDLE_TIMEOUT_SECONDS,
+                )
+            except asyncio.TimeoutError:
+                await websocket.close(code=1000, reason="Idle timeout")
+                return
             except json.JSONDecodeError:
                 await connection_manager.send_message(
                     conversation_id,
@@ -351,19 +459,6 @@ async def websocket_endpoint(
                 pong = await handle_ping(conversation_id)
                 await connection_manager.send_message(conversation_id, pong)
 
-            elif message.type == ClientMessageType.TEXT:
-                text_data = message.get_text_data()
-                if text_data:
-                    # Run in background to not block other messages
-                    asyncio.create_task(
-                        handle_text_message(conversation_id, text_data.content)
-                    )
-                else:
-                    await connection_manager.send_message(
-                        conversation_id,
-                        ServerMessage.error(1001, "Missing text content"),
-                    )
-
             elif message.type == ClientMessageType.AUDIO:
                 audio_data = message.get_audio_data()
                 if audio_data:
@@ -371,7 +466,7 @@ async def websocket_endpoint(
                         handle_audio_message(
                             conversation_id,
                             audio_data.audio,
-                            audio_data.is_final,
+                            audio_data.sequence,
                         )
                     )
                 else:
@@ -379,6 +474,9 @@ async def websocket_endpoint(
                         conversation_id,
                         ServerMessage.error(1001, "Missing audio data"),
                     )
+
+            elif message.type == ClientMessageType.END_SPEAKING:
+                asyncio.create_task(handle_end_speaking(conversation_id))
 
             elif message.type == ClientMessageType.IMAGE:
                 image_data = message.get_image_data()
@@ -392,6 +490,12 @@ async def websocket_endpoint(
 
             elif message.type == ClientMessageType.INTERRUPT:
                 await handle_interrupt(conversation_id)
+
+            # Check listening timeout (user interrupted but didn't speak for 1 minute)
+            if check_listening_timeout(conversation_id):
+                logger.info(f"Listening timeout for conversation {conversation_id}")
+                await websocket.close(code=1000, reason="Listening timeout")
+                return
 
     except WebSocketDisconnect:
         # Client disconnected
@@ -407,6 +511,7 @@ async def websocket_endpoint(
         except Exception:
             pass
     finally:
-        # Clean up connection and audio buffer
-        audio_buffers.pop(conversation_id, None)
+        # Clean up connection, ASR session, and listening state
+        await stop_asr_session(conversation_id)
+        listening_since.pop(conversation_id, None)
         await connection_manager.disconnect(conversation_id)
