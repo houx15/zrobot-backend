@@ -205,7 +205,7 @@ async def submit_correction(
             correction.id,
             correction_response.subject,
             correction_response.correct_count,
-            correction_response.total_questions,
+            correction_response.correct_count + correction_response.wrong_count,
         )
         await db.commit()
 
