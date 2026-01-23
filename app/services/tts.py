@@ -222,7 +222,7 @@ class TTSService:
         try:
             async with websockets.connect(
                 self.WS_URL,
-                additional_headers=headers,
+                extra_headers=headers,
                 max_size=10 * 1024 * 1024
             ) as websocket:
                 # Build request

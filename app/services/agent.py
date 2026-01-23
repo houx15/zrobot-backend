@@ -6,6 +6,7 @@ Orchestrates the ASR -> LLM -> TTS pipeline for real-time AI conversation.
 
 import asyncio
 import json
+import re
 import logging
 import base64
 from typing import AsyncGenerator, Optional, List, Dict, Callable, Any
@@ -182,6 +183,24 @@ class SegmentParser:
 
         self.reset()
         return None
+
+
+def extract_segments_from_text(text: str) -> List[Segment]:
+    """Extract [S]...[/S][B]...[/B] segments from full text."""
+    if not text:
+        return []
+    # Remove code fence markers but keep content.
+    cleaned = text.replace("```", "")
+    pattern = re.compile(r"\[S\](.*?)\[/S\]\s*\[B\](.*?)\[/B\]", re.S)
+    segments: List[Segment] = []
+    idx = 0
+    for match in pattern.finditer(cleaned):
+        speech = match.group(1).strip()
+        board = match.group(2).strip()
+        if speech or board:
+            segments.append(Segment(segment_id=idx, speech=speech, board=board))
+            idx += 1
+    return segments
 
 
 class AIAgent:
@@ -667,22 +686,37 @@ class AIAgent:
                     yield final_segment
                     emitted_segments += 1
 
-            # Fallback: if no segments were parsed, send full response as speech-only
+            # Fallback: if no segments were parsed, try regex extraction from full response
             if emitted_segments == 0 and full_response and not await self.check_interrupt(conversation_id):
-                fallback = Segment(
-                    segment_id=0,
-                    speech=full_response.strip(),
-                    board=":::note{color=yellow}\n未生成板书，以下为老师讲解\n:::",
-                )
-                try:
-                    audio_data = await self.tts.synthesize(fallback.speech)
-                    if audio_data:
-                        fallback.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
-                except Exception as e:
-                    logger.error(f"TTS error for fallback segment: {e}")
-                if on_segment:
-                    on_segment(fallback)
-                yield fallback
+                extracted = extract_segments_from_text(full_response)
+                if extracted:
+                    for segment in extracted:
+                        try:
+                            if segment.speech:
+                                audio_data = await self.tts.synthesize(segment.speech)
+                                if audio_data:
+                                    segment.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                        except Exception as e:
+                            logger.error(f"TTS error for extracted segment: {e}")
+                        if on_segment:
+                            on_segment(segment)
+                        yield segment
+                    emitted_segments += len(extracted)
+                else:
+                    fallback = Segment(
+                        segment_id=0,
+                        speech=full_response.strip(),
+                        board=":::note{color=yellow}\n未生成板书，以下为老师讲解\n:::",
+                    )
+                    try:
+                        audio_data = await self.tts.synthesize(fallback.speech)
+                        if audio_data:
+                            fallback.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                    except Exception as e:
+                        logger.error(f"TTS error for fallback segment: {e}")
+                    if on_segment:
+                        on_segment(fallback)
+                    yield fallback
 
             # Store assistant message (full response)
             if full_response:
