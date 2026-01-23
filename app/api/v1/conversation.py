@@ -269,7 +269,7 @@ async def create_conversation(
     ws_token = create_ws_token(conversation.id, current_user.id)
 
     # 5. Build WebSocket URL based on request host
-    host = http_request.headers.get("host", "localhost:8000")
+    host = http_request.headers.get("host", "localhost:8093")
     # Use wss for HTTPS, ws for HTTP
     ws_scheme = "wss" if http_request.url.scheme == "https" else "ws"
     ws_url = f"{ws_scheme}://{host}/ws/conversation/{conversation.id}"

@@ -7,7 +7,7 @@ import pytest
 
 @pytest.fixture(scope="session")
 def base_url() -> str:
-    return os.getenv("BASE_URL", "http://localhost:8000/api/v1/student")
+    return os.getenv("BASE_URL", "http://localhost:8093/api/v1/student")
 
 
 @pytest.fixture(scope="session")

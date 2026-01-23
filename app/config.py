@@ -12,10 +12,12 @@ class Settings(BaseSettings):
 
     # Server
     host: str = "0.0.0.0"
-    port: int = 8000
+    port: int = 8093
 
     # Database
-    database_url: str = "postgresql+asyncpg://postgres:password@localhost:5432/ai_learning_tablet"
+    database_url: str = (
+        "postgresql+asyncpg://postgres:password@localhost:5432/ai_learning_tablet"
+    )
 
     # Redis
     redis_url: str = "redis://localhost:6379/0"

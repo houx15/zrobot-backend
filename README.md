@@ -17,19 +17,19 @@ python -m scripts.create_test_user
 
 Run the server:
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8093
 ```
 
 Health check:
 ```
-http://localhost:8000/health
+http://localhost93/health
 ```
 
 ## Tests
 
 ```bash
 export RUN_INTEGRATION=1
-export BASE_URL=http://localhost:8000/api/v1/student
+export BASE_URL=http://localhost:8093/api/v1/student
 pytest -q tests
 ```
 

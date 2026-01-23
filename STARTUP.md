@@ -97,19 +97,19 @@ This creates a default test student:
 ## 7) Run Backend
 
 ```bash
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8093
 ```
 
 Health check:
 ```
-http://localhost:8000/health
+http://localhost:8093/health
 ```
 
 ## 8) Run Integration Tests (Optional)
 
 ```bash
 export RUN_INTEGRATION=1
-export BASE_URL=http://localhost:8000/api/v1/student
+export BASE_URL=http://localhost:8093/api/v1/student
 pytest -q tests
 ```
 
@@ -149,13 +149,13 @@ python3 -m venv .venv
 source .venv/bin/activate
 pip install -r requirements.txt
 python -m scripts.create_test_user
-uvicorn app.main:app --reload --host 0.0.0.0 --port 8000
+uvicorn app.main:app --reload --host 0.0.0.0 --port 8093
 ```
 
 Run tests:
 ```bash
 export RUN_INTEGRATION=1
-export BASE_URL=http://<dev-server-ip>:8000/api/v1/student
+export BASE_URL=http://<dev-server-ip>:8093/api/v1/student
 pytest -q tests
 ```
 
@@ -178,7 +178,7 @@ Pull and run:
 ```bash
 docker pull <your-registry>/<image-name>:<tag>
 docker run -d --name learning-api \
-  -p 8000:8000 \
+  -p 8093:8093 \
   -e DATABASE_URL=postgresql+asyncpg://postgres:password@<db-host>:5432/ai_learning_tablet \
   -e REDIS_URL=redis://<redis-host>:6379/0 \
   -e ZHIPU_API_KEY=... \
