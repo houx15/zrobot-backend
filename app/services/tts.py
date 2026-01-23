@@ -22,6 +22,41 @@ from app.config import settings
 logger = logging.getLogger(__name__)
 
 
+def _detect_audio_format(data: bytes) -> Optional[str]:
+    if len(data) < 4:
+        return None
+    if data.startswith(b"ID3") or data[:2] == b"\xFF\xFB" or data[:2] == b"\xFF\xF3" or data[:2] == b"\xFF\xF2":
+        return "mp3"
+    if data.startswith(b"OggS"):
+        return "ogg"
+    if data.startswith(b"RIFF"):
+        return "wav"
+    return None
+
+
+def _wrap_wav(pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+    byte_rate = sample_rate * channels * bits_per_sample // 8
+    block_align = channels * bits_per_sample // 8
+    data_size = len(pcm_data)
+    header = struct.pack(
+        "<4sI4s4sIHHIIHH4sI",
+        b"RIFF",
+        36 + data_size,
+        b"WAVE",
+        b"fmt ",
+        16,
+        1,
+        channels,
+        sample_rate,
+        byte_rate,
+        block_align,
+        bits_per_sample,
+        b"data",
+        data_size,
+    )
+    return header + pcm_data
+
+
 class MsgType(IntEnum):
     """TTS message types"""
     FullClientRequest = 0b0001
@@ -300,7 +335,12 @@ class TTSService:
                 chunks.append(chunk)
 
             if chunks:
-                return b"".join(chunks)
+                audio = b"".join(chunks)
+                fmt = _detect_audio_format(audio)
+                if not fmt:
+                    logger.warning("TTS audio format unknown, wrapping as WAV")
+                    return _wrap_wav(audio, sample_rate=self.sample_rate, channels=1, bits_per_sample=16)
+                return audio
             return None
 
         except Exception as e:
