@@ -313,27 +313,27 @@ async def submit_correction(
         )
         await db.commit()
 
-        if (
-            correction.correcting_count
-            and correction.api_trace_id
-            and correction.image_id
-        ):
-            result = await db.execute(
-                select(QuestionHistory).where(
-                    QuestionHistory.correction_id == correction.id,
-                    QuestionHistory.is_finish != True,
-                )
-            )
-            pending_questions = result.scalars().all()
-            if pending_questions:
-                asyncio.create_task(
-                    _poll_and_update_async(
-                        correction_id=correction.id,
-                        trace_id=correction.api_trace_id,
-                        image_id=correction.image_id,
-                        questions=pending_questions,
-                    )
-                )
+        # if (
+        #     correction.correcting_count
+        #     and correction.api_trace_id
+        #     and correction.image_id
+        # ):
+        #     result = await db.execute(
+        #         select(QuestionHistory).where(
+        #             QuestionHistory.correction_id == correction.id,
+        #             QuestionHistory.is_finish != True,
+        #         )
+        #     )
+        #     pending_questions = result.scalars().all()
+        #     if pending_questions:
+        #         asyncio.create_task(
+        #             _poll_and_update_async(
+        #                 correction_id=correction.id,
+        #                 trace_id=correction.api_trace_id,
+        #                 image_id=correction.image_id,
+        #                 questions=pending_questions,
+        #             )
+        #         )
 
         return BaseResponse.success(
             data=CorrectionSubmitData(
