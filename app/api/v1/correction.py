@@ -182,7 +182,8 @@ async def submit_correction(
             QuestionResult(
                 question_index=q.question_index,
                 question_detail_id=q.id,
-                is_correct=q.is_correct or False,
+                is_correct=q.is_correct,
+                is_finish=q.is_finish,
                 question_bbox=q.question_bbox,
                 answer_bbox=q.answer_bbox,
                 user_answer=q.user_answer,

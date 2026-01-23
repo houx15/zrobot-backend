@@ -12,7 +12,8 @@ class QuestionResult(BaseModel):
     """Single question result"""
     question_index: int
     question_detail_id: int
-    is_correct: bool
+    is_correct: Optional[bool] = None
+    is_finish: Optional[bool] = None
     question_bbox: Optional[List[int]] = None
     answer_bbox: Optional[List[int]] = None
     user_answer: Optional[str] = None
