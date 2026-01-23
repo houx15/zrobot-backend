@@ -159,9 +159,8 @@ class ZhipuService:
         if (result.get("code") != 200) and (result.get("status") != "success"):
             raise Exception(f"Zhipu API error: {result}")
 
-        data = result.get("data", {})
         try:
-            llm_result = data["choices"][0]["messages"][0]["content"]["object"]
+            llm_result = result["choices"][0]["messages"][0]["content"]["object"]
         except Exception as e:
             raise Exception(f"Zhipu API error: {e}")
         trace_id = llm_result.get("trace_id", "")
