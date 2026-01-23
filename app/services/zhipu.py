@@ -224,6 +224,12 @@ class ZhipuService:
         current_title: Optional[str] = None
         for raw_line in text.splitlines():
             line = raw_line.strip()
+            # Handle inline headers like: "xxx ### 标题"
+            if "###" in line and not line.startswith("###"):
+                prefix, header = line.split("###", 1)
+                if current_title is not None and prefix.strip():
+                    sections[current_title].append(prefix.rstrip())
+                line = f"### {header.strip()}"
             if line.startswith("###"):
                 title = line.lstrip("#").strip()
                 current_title = title
