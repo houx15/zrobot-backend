@@ -1,7 +1,7 @@
 """WebSocket endpoint handler for AI conversation"""
 
 from fastapi import WebSocket, WebSocketDisconnect, Query, Path
-from datetime import datetime, timezone
+from datetime import datetime, timezone, timedelta
 import json
 import asyncio
 import base64
@@ -27,8 +27,11 @@ asr_queues: Dict[int, asyncio.Queue] = {}
 asr_tasks: Dict[int, asyncio.Task] = {}
 interrupt_flags: Dict[int, bool] = defaultdict(bool)
 listening_since: Dict[int, Optional[datetime]] = {}  # Track when entered LISTENING state
+forced_end_until: Dict[int, datetime] = {}
 IDLE_TIMEOUT_SECONDS = 60
 LISTENING_TIMEOUT_SECONDS = 60  # End conversation if no audio for 1 minute in LISTENING state
+PARTIAL_STABLE_SECONDS = 1.5
+FORCED_END_GRACE_SECONDS = 2.0
 
 
 async def verify_connection(
@@ -249,6 +252,9 @@ async def handle_audio_message(
     await update_last_active(conversation_id)
 
     try:
+        until = forced_end_until.get(conversation_id)
+        if until and datetime.now(timezone.utc) < until:
+            return
         # Decode base64 audio data
         pcm_bytes = base64.b64decode(audio_data)
         queue = await ensure_asr_session(conversation_id)
@@ -365,6 +371,8 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
 
     async def asr_worker():
         final_text = ""
+        prev_text = ""
+        last_change_at = datetime.now(timezone.utc)
         try:
             async for result in ai_agent.asr.transcribe_stream(
                 audio_generator(),
@@ -376,6 +384,23 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
                 )
                 if result.is_final:
                     final_text = result.text
+                    break
+                # If partial transcript is stable for a while, treat as end of speech.
+                now = datetime.now(timezone.utc)
+                if result.text != prev_text:
+                    prev_text = result.text
+                    last_change_at = now
+                else:
+                    elapsed = (now - last_change_at).total_seconds()
+                    if prev_text and elapsed >= PARTIAL_STABLE_SECONDS:
+                        final_text = prev_text
+                        await connection_manager.send_message(
+                            conversation_id,
+                            ServerMessage.transcript(final_text, is_final=True),
+                        )
+                        forced_end_until[conversation_id] = now + timedelta(seconds=FORCED_END_GRACE_SECONDS)
+                        queue.put_nowait(None)
+                        break
 
             if final_text:
                 await handle_text_message(conversation_id, final_text)
