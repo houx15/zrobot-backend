@@ -219,22 +219,38 @@ class ZhipuService:
 
     @staticmethod
     def _parse_solution_sections(text: str) -> Dict[str, str]:
-        """Parse markdown-like sections split by ### headers."""
+        """Parse markdown-like sections split by ### headers or **标题**： lines."""
         sections: Dict[str, List[str]] = {}
         current_title: Optional[str] = None
+
+        text = text.replace("###", "\n###")
+
+        bold_header_re = re.compile(r"^\*\*(.+?)\*\*[：:]")
+
         for raw_line in text.splitlines():
             line = raw_line.strip()
-            # Handle inline headers like: "xxx ### 标题"
-            if "###" in line and not line.startswith("###"):
-                prefix, header = line.split("###", 1)
-                if current_title is not None and prefix.strip():
-                    sections[current_title].append(prefix.rstrip())
-                line = f"### {header.strip()}"
+
+            # 1. Explicit ### header
             if line.startswith("###"):
                 title = line.lstrip("#").strip()
                 current_title = title
                 sections[current_title] = []
                 continue
+
+            # 2. Implicit bold header like: **知识点**：
+            m = bold_header_re.match(line)
+            if m:
+                title = m.group(1).strip()
+                current_title = title
+                sections.setdefault(current_title, [])
+
+                # keep rest of line (after **标题**：) if any
+                rest = line[m.end() :].strip()
+                if rest:
+                    sections[current_title].append(rest)
+                continue
+
+            # 3. Normal content
             if current_title is not None:
                 sections[current_title].append(raw_line)
 
