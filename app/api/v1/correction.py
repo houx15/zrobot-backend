@@ -59,7 +59,10 @@ async def create_question_records(
 
 def _parse_polling_results(polling_response: dict):
     try:
-        if polling_response.get("code") not in (200, 0) and polling_response.get("status") != "success":
+        if (
+            polling_response.get("code") not in (200, 0)
+            and polling_response.get("status") != "success"
+        ):
             return None
         llm_result = polling_response["choices"][0]["messages"][0]["content"]["object"]
         raw_response = llm_result.get("image_results", [None])[0]
@@ -74,16 +77,14 @@ def _parse_polling_results(polling_response: dict):
         return None
 
 
-async def _apply_polling_results(db, correction_id: int, polling_results: dict):
+async def _apply_polling_results(
+    db, correction_id: int, questions: list, polling_results: dict
+):
     if not polling_results:
         return
     raw_results = polling_results.get("results") or []
     if not raw_results:
         return
-    result = await db.execute(
-        select(QuestionHistory).where(QuestionHistory.correction_id == correction_id)
-    )
-    questions = result.scalars().all()
     questions_by_uuid = {q.question_uuid: q for q in questions if q.question_uuid}
 
     for item in raw_results:
@@ -116,8 +117,9 @@ async def _poll_and_update_async(
     correction_id: int,
     trace_id: str,
     image_id: str,
-    uuids: list,
+    questions: list,
 ):
+    uuids = [q.question_uuid for q in questions if q.question_uuid]
     if not uuids:
         return
     async with async_session_maker() as session:
@@ -133,9 +135,13 @@ async def _poll_and_update_async(
                 polling_response,
             )
             polling_results = _parse_polling_results(polling_response)
-            await _apply_polling_results(session, correction_id, polling_results)
+            await _apply_polling_results(
+                session, correction_id, questions, polling_results
+            )
         except Exception:
-            logger.exception("[correction.polling] failed correction_id=%s", correction_id)
+            logger.exception(
+                "[correction.polling] failed correction_id=%s", correction_id
+            )
 
 
 async def update_knowledge_points(
@@ -195,7 +201,7 @@ async def create_study_record(
     subject_label = subject_map.get((subject or "").lower(), subject or "")
     total = correct_count + wrong_count
     accuracy = int(correct_count / total * 100) if total > 0 else 0
-    abstract = f"批改{subject_label}作业，正确率{accuracy}%"
+    abstract = f"批改{subject_label}作业"
 
     record = StudyRecord(
         user_id=user_id,
@@ -307,6 +313,28 @@ async def submit_correction(
         )
         await db.commit()
 
+        if (
+            correction.correcting_count
+            and correction.api_trace_id
+            and correction.image_id
+        ):
+            result = await db.execute(
+                select(QuestionHistory).where(
+                    QuestionHistory.correction_id == correction.id,
+                    QuestionHistory.is_finish != True,
+                )
+            )
+            pending_questions = result.scalars().all()
+            if uuids:
+                asyncio.create_task(
+                    _poll_and_update_async(
+                        correction_id=correction.id,
+                        trace_id=correction.api_trace_id,
+                        image_id=correction.image_id,
+                        questions=pending_questions,
+                    )
+                )
+
         return BaseResponse.success(
             data=CorrectionSubmitData(
                 correction_id=correction.id,
@@ -347,27 +375,6 @@ async def get_correction_detail(
     correction = result.scalar_one_or_none()
     if not correction:
         return BaseResponse.error("批改记录不存在")
-
-    # Poll unfinished questions asynchronously if needed
-    if correction.api_trace_id and correction.image_id:
-        result = await db.execute(
-            select(QuestionHistory).where(
-                QuestionHistory.correction_id == correction.id,
-                QuestionHistory.is_finish != True,
-            )
-        )
-        pending_questions = result.scalars().all()
-        if pending_questions:
-            uuids = [q.question_uuid for q in pending_questions if q.question_uuid]
-            if uuids:
-                asyncio.create_task(
-                    _poll_and_update_async(
-                        correction_id=correction.id,
-                        trace_id=correction.api_trace_id,
-                        image_id=correction.image_id,
-                        uuids=uuids,
-                    )
-                )
 
     # Reload questions for response
     result = await db.execute(
