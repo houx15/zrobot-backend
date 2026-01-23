@@ -174,11 +174,11 @@ class ZhipuService:
         correcting_count = raw_response.get("stat_result", {}).get("correcting", 0)
 
         raw_results = raw_response.get("results", [])
-        user_answer = raw_results.get("answers", [None])[0]
 
         results = []
 
         for item in raw_results:
+            user_answer = item.get("answers", [None])[0]
             is_correct = item.get("correct_result") == 1
             is_finish = item.get("is_finish") == 1
 
