@@ -378,12 +378,14 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
                 audio_generator(),
                 interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
             ):
-                await connection_manager.send_message(
-                    conversation_id,
-                    ServerMessage.transcript(result.text, is_final=result.is_final),
-                )
+                text = (result.text or "").strip()
+                if text:
+                    await connection_manager.send_message(
+                        conversation_id,
+                        ServerMessage.transcript(text, is_final=result.is_final),
+                    )
                 if result.is_final:
-                    final_text = result.text
+                    final_text = text
                     break
                 # If partial transcript is stable for a while, treat as end of speech.
                 now = datetime.now(timezone.utc)
