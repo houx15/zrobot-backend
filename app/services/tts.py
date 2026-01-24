@@ -96,6 +96,8 @@ class TTSMessage:
     payload: Optional[bytes] = None
     error_code: int = 0
     error_message: str = ""
+    serialization: int = 0
+    compression: int = 0
 
 
 def build_tts_header(
@@ -148,6 +150,8 @@ def parse_tts_response(data: bytes) -> TTSMessage:
     compression = data[2] & 0x0F
 
     msg.type = MsgType(msg_type)
+    msg.serialization = serialization
+    msg.compression = compression
 
     # Skip header
     offset = header_size * 4
@@ -173,7 +177,7 @@ def parse_tts_response(data: bytes) -> TTSMessage:
                         payload = gzip.decompress(payload)
                     except Exception:
                         pass
-                # Could parse JSON here if needed
+                msg.payload = payload
 
     elif msg.type == MsgType.AudioOnlyServer:
         if offset + 4 <= len(data):
@@ -202,6 +206,21 @@ def parse_tts_response(data: bytes) -> TTSMessage:
                     pass
 
     return msg
+
+
+def _log_server_message(msg: TTSMessage) -> None:
+    if not msg.payload:
+        return
+    try:
+        text = msg.payload.decode("utf-8")
+    except Exception:
+        logger.info("TTS server response received (non-utf8 payload, %d bytes)", len(msg.payload))
+        return
+    try:
+        payload = json.loads(text)
+        logger.info("TTS server response: %s", payload)
+    except Exception:
+        logger.info("TTS server response (raw): %s", text)
 
 
 async def receive_message(websocket) -> TTSMessage:
@@ -298,6 +317,7 @@ class TTSService:
                         break
 
                     if msg.type == MsgType.FullServerResponse:
+                        _log_server_message(msg)
                         if msg.event == EventType.SessionFinished:
                             break
                     elif msg.type == MsgType.AudioOnlyServer:
