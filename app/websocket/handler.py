@@ -421,6 +421,11 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
                 interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
             ):
                 text = (result.text or "").strip()
+                if text and text != prev_text:
+                    await connection_manager.send_message(
+                        conversation_id,
+                        ServerMessage.transcript(text, is_final=False),
+                    )
                 if result.is_final and text:
                     await connection_manager.send_message(
                         conversation_id,
