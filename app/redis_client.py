@@ -53,6 +53,9 @@ class RedisClient:
     async def hgetall(self, name: str) -> dict:
         return await self.client.hgetall(name)
 
+    async def hdel(self, name: str, *keys: str) -> int:
+        return await self.client.hdel(name, *keys)
+
     async def hmset(self, name: str, mapping: dict) -> bool:
         return await self.client.hset(name, mapping=mapping)
 
