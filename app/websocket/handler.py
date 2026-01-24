@@ -299,7 +299,6 @@ async def handle_audio_message(
             return
         # Decode base64 audio data
         pcm_bytes = base64.b64decode(audio_data)
-        logger.warning("ASR audio chunk received bytes=%s", len(pcm_bytes))
         queue = await ensure_asr_session(conversation_id)
         # Sequence is accepted for client ordering but ASR streaming uses arrival order.
         await queue.put(pcm_bytes)
@@ -556,12 +555,6 @@ async def websocket_endpoint(
             elif message.type == ClientMessageType.AUDIO:
                 audio_data = message.get_audio_data()
                 if audio_data:
-                    logger.warning(
-                        "WS audio message received conv=%s seq=%s b64_len=%s",
-                        conversation_id,
-                        audio_data.sequence,
-                        len(audio_data.audio) if audio_data.audio else 0,
-                    )
                     asyncio.create_task(
                         handle_audio_message(
                             conversation_id,
