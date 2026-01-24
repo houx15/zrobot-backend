@@ -25,7 +25,12 @@ logger = logging.getLogger(__name__)
 def _detect_audio_format(data: bytes) -> Optional[str]:
     if len(data) < 4:
         return None
-    if data.startswith(b"ID3") or data[:2] == b"\xFF\xFB" or data[:2] == b"\xFF\xF3" or data[:2] == b"\xFF\xF2":
+    if (
+        data.startswith(b"ID3")
+        or data[:2] == b"\xff\xfb"
+        or data[:2] == b"\xff\xf3"
+        or data[:2] == b"\xff\xf2"
+    ):
         return "mp3"
     if data.startswith(b"OggS"):
         return "ogg"
@@ -34,7 +39,12 @@ def _detect_audio_format(data: bytes) -> Optional[str]:
     return None
 
 
-def _wrap_wav(pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, bits_per_sample: int = 16) -> bytes:
+def _wrap_wav(
+    pcm_data: bytes,
+    sample_rate: int = 16000,
+    channels: int = 1,
+    bits_per_sample: int = 16,
+) -> bytes:
     byte_rate = sample_rate * channels * bits_per_sample // 8
     block_align = channels * bits_per_sample // 8
     data_size = len(pcm_data)
@@ -59,6 +69,7 @@ def _wrap_wav(pcm_data: bytes, sample_rate: int = 16000, channels: int = 1, bits
 
 class MsgType(IntEnum):
     """TTS message types"""
+
     FullClientRequest = 0b0001
     AudioOnlyClient = 0b0010
     FullServerResponse = 0b1001
@@ -68,6 +79,7 @@ class MsgType(IntEnum):
 
 class EventType(IntEnum):
     """TTS event types"""
+
     SessionStarted = 1
     TaskStarted = 2
     SentenceStart = 3
@@ -78,12 +90,14 @@ class EventType(IntEnum):
 
 class SerializationType(IntEnum):
     """Serialization types"""
+
     NoSerialization = 0b0000
     JSON = 0b0001
 
 
 class CompressionType(IntEnum):
     """Compression types"""
+
     NoCompression = 0b0000
     GZIP = 0b0001
 
@@ -91,6 +105,7 @@ class CompressionType(IntEnum):
 @dataclass
 class TTSMessage:
     """TTS message structure"""
+
     type: MsgType
     event: int = 0
     payload: Optional[bytes] = None
@@ -162,16 +177,16 @@ def parse_tts_response(data: bytes) -> TTSMessage:
 
     if flags & 0x04:  # has event
         if offset + 4 <= len(data):
-            msg.event = struct.unpack(">i", data[offset:offset+4])[0]
+            msg.event = struct.unpack(">i", data[offset : offset + 4])[0]
             offset += 4
 
     # Parse payload based on message type
     if msg.type == MsgType.FullServerResponse:
         if offset + 4 <= len(data):
-            payload_size = struct.unpack(">I", data[offset:offset+4])[0]
+            payload_size = struct.unpack(">I", data[offset : offset + 4])[0]
             offset += 4
             if offset + payload_size <= len(data):
-                payload = data[offset:offset+payload_size]
+                payload = data[offset : offset + payload_size]
                 if compression == CompressionType.GZIP:
                     try:
                         payload = gzip.decompress(payload)
@@ -181,20 +196,20 @@ def parse_tts_response(data: bytes) -> TTSMessage:
 
     elif msg.type == MsgType.AudioOnlyServer:
         if offset + 4 <= len(data):
-            payload_size = struct.unpack(">I", data[offset:offset+4])[0]
+            payload_size = struct.unpack(">I", data[offset : offset + 4])[0]
             offset += 4
             if offset + payload_size <= len(data):
-                msg.payload = data[offset:offset+payload_size]
+                msg.payload = data[offset : offset + payload_size]
 
     elif msg.type == MsgType.ErrorResponse:
         if offset + 4 <= len(data):
-            msg.error_code = struct.unpack(">i", data[offset:offset+4])[0]
+            msg.error_code = struct.unpack(">i", data[offset : offset + 4])[0]
             offset += 4
         if offset + 4 <= len(data):
-            error_size = struct.unpack(">I", data[offset:offset+4])[0]
+            error_size = struct.unpack(">I", data[offset : offset + 4])[0]
             offset += 4
             if offset + error_size <= len(data):
-                error_data = data[offset:offset+error_size]
+                error_data = data[offset : offset + error_size]
                 if compression == CompressionType.GZIP:
                     try:
                         error_data = gzip.decompress(error_data)
@@ -214,7 +229,10 @@ def _log_server_message(msg: TTSMessage) -> None:
     try:
         text = msg.payload.decode("utf-8")
     except Exception:
-        logger.info("TTS server response received (non-utf8 payload, %d bytes)", len(msg.payload))
+        logger.info(
+            "TTS server response received (non-utf8 payload, %d bytes)",
+            len(msg.payload),
+        )
         return
     try:
         payload = json.loads(text)
@@ -228,7 +246,9 @@ async def receive_message(websocket) -> TTSMessage:
     data = await websocket.recv()
     if isinstance(data, bytes):
         return parse_tts_response(data)
-    return TTSMessage(type=MsgType.ErrorResponse, error_message="Unexpected message type")
+    return TTSMessage(
+        type=MsgType.ErrorResponse, error_message="Unexpected message type"
+    )
 
 
 class TTSService:
@@ -275,10 +295,9 @@ class TTSService:
 
         try:
             async with websockets.connect(
-                self.WS_URL,
-                extra_headers=headers,
-                max_size=10 * 1024 * 1024
+                self.WS_URL, extra_headers=headers, max_size=10 * 1024 * 1024
             ) as websocket:
+                logged_audio_chunk = False
                 # Build request
                 request = {
                     "user": {
@@ -294,9 +313,11 @@ class TTSService:
                         "text": text,
                         "speed_ratio": speed_ratio,
                         "volume_ratio": volume_ratio,
-                        "additions": json.dumps({
-                            "disable_markdown_filter": False,
-                        }),
+                        "additions": json.dumps(
+                            {
+                                "disable_markdown_filter": False,
+                            }
+                        ),
                     },
                 }
 
@@ -311,7 +332,9 @@ class TTSService:
                         break
 
                     try:
-                        msg = await asyncio.wait_for(receive_message(websocket), timeout=30.0)
+                        msg = await asyncio.wait_for(
+                            receive_message(websocket), timeout=30.0
+                        )
                     except asyncio.TimeoutError:
                         logger.warning("TTS receive timeout")
                         break
@@ -359,7 +382,12 @@ class TTSService:
                 fmt = _detect_audio_format(audio)
                 if not fmt:
                     logger.warning("TTS audio format unknown, wrapping as WAV")
-                    return _wrap_wav(audio, sample_rate=self.sample_rate, channels=1, bits_per_sample=16)
+                    return _wrap_wav(
+                        audio,
+                        sample_rate=self.sample_rate,
+                        channels=1,
+                        bits_per_sample=16,
+                    )
                 return audio
             return None
 

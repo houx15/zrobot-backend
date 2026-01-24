@@ -115,7 +115,7 @@ class SegmentParser:
                 else:
                     break
 
-            # Look for [B] start tag
+            # Look for [B] start tag (optional for simple replies)
             if not self.in_speech and not self.in_board and self.current_speech:
                 b_start = self.buffer.find("[B]")
                 if b_start != -1:
@@ -123,6 +123,19 @@ class SegmentParser:
                     self.in_board = True
                     self.current_board = ""
                 else:
+                    next_s = self.buffer.find("[S]")
+                    if next_s != -1:
+                        # Emit speech-only segment before next [S]
+                        segment = Segment(
+                            segment_id=self.current_segment_id,
+                            speech=self.current_speech,
+                            board="",
+                        )
+                        segments.append(segment)
+                        self.current_segment_id += 1
+                        self.current_speech = ""
+                        # Continue loop to process the next [S]
+                        continue
                     break
 
             # Look for [/B] end tag
@@ -171,6 +184,16 @@ class SegmentParser:
             self.reset()
             return segment
 
+        # If we have speech but no board, emit speech-only segment
+        if self.current_speech and not self.current_board:
+            segment = Segment(
+                segment_id=self.current_segment_id,
+                speech=self.current_speech,
+                board="",
+            )
+            self.reset()
+            return segment
+
         # If we have speech but no board yet, check buffer for board content
         if self.current_speech and self.in_board and self.buffer:
             segment = Segment(
@@ -186,17 +209,17 @@ class SegmentParser:
 
 
 def extract_segments_from_text(text: str) -> List[Segment]:
-    """Extract [S]...[/S][B]...[/B] segments from full text."""
+    """Extract [S]...[/S] with optional [B]...[/B] segments from full text."""
     if not text:
         return []
     # Remove code fence markers but keep content.
     cleaned = text.replace("```", "")
-    pattern = re.compile(r"\[S\](.*?)\[/S\]\s*\[B\](.*?)\[/B\]", re.S)
+    pattern = re.compile(r"\[S\](.*?)\[/S\](?:\s*\[B\](.*?)\[/B\])?", re.S)
     segments: List[Segment] = []
     idx = 0
     for match in pattern.finditer(cleaned):
         speech = match.group(1).strip()
-        board = match.group(2).strip()
+        board = (match.group(2) or "").strip()
         if speech or board:
             segments.append(Segment(segment_id=idx, speech=speech, board=board))
             idx += 1

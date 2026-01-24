@@ -379,12 +379,11 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
                 interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
             ):
                 text = (result.text or "").strip()
-                if text:
+                if result.is_final and text:
                     await connection_manager.send_message(
                         conversation_id,
-                        ServerMessage.transcript(text, is_final=result.is_final),
+                        ServerMessage.transcript(text, is_final=True),
                     )
-                if result.is_final:
                     final_text = text
                     break
                 # If partial transcript is stable for a while, treat as end of speech.
