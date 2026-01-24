@@ -101,11 +101,7 @@ class TTSService:
         self.resource_id = settings.volc_tts_resource_id
 
     def _get_resource_id(self) -> str:
-        if self.resource_id:
-            return self.resource_id
-        if self.voice_type.startswith("S_"):
-            return "volc.megatts.default"
-        return "volc.service_type.10029"
+        return "seed-tts-2.0"
 
     async def synthesize_stream(
         self,
