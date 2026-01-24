@@ -299,6 +299,7 @@ async def handle_audio_message(
             return
         # Decode base64 audio data
         pcm_bytes = base64.b64decode(audio_data)
+        logger.info("ASR audio chunk received bytes=%s", len(pcm_bytes))
         queue = await ensure_asr_session(conversation_id)
         # Sequence is accepted for client ordering but ASR streaming uses arrival order.
         await queue.put(pcm_bytes)
@@ -448,10 +449,6 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
             if final_text:
                 await handle_text_message(conversation_id, final_text)
             else:
-                await connection_manager.send_message(
-                    conversation_id,
-                    ServerMessage.transcript("(无法识别语音)", is_final=True),
-                )
                 await send_state_change(conversation_id, ConversationState.IDLE)
         except Exception as e:
             logger.error(f"ASR streaming error: {e}")
