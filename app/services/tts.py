@@ -5,19 +5,22 @@ Based on Volcano Engine v3 WebSocket API for streaming speech synthesis.
 """
 
 import asyncio
-import json
-import uuid
 import base64
-import struct
-import gzip
+import json
 import logging
-from typing import AsyncGenerator, Optional, Callable
-from dataclasses import dataclass
-from enum import IntEnum
+import struct
+import uuid
+from typing import AsyncGenerator, Callable, Optional
 
 import websockets
 
 from app.config import settings
+from app.services.volc_tts_protocol import (
+    EventType,
+    MsgType,
+    full_client_request,
+    receive_message,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -67,163 +70,7 @@ def _wrap_wav(
     return header + pcm_data
 
 
-class MsgType(IntEnum):
-    """TTS message types"""
-
-    FullClientRequest = 0b0001
-    AudioOnlyClient = 0b0010
-    FullServerResponse = 0b1001
-    AudioOnlyServer = 0b1011
-    ErrorResponse = 0b1111
-
-
-class EventType(IntEnum):
-    """TTS event types"""
-
-    SessionStarted = 1
-    TaskStarted = 2
-    SentenceStart = 3
-    SentenceEnd = 4
-    TaskFinished = 5
-    SessionFinished = 6
-
-
-class SerializationType(IntEnum):
-    """Serialization types"""
-
-    NoSerialization = 0b0000
-    JSON = 0b0001
-
-
-class CompressionType(IntEnum):
-    """Compression types"""
-
-    NoCompression = 0b0000
-    GZIP = 0b0001
-
-
-@dataclass
-class TTSMessage:
-    """TTS message structure"""
-
-    type: MsgType
-    event: int = 0
-    payload: Optional[bytes] = None
-    error_code: int = 0
-    error_message: str = ""
-    serialization: int = 0
-    compression: int = 0
-
-
-def build_tts_header(
-    msg_type: MsgType,
-    serialization: SerializationType = SerializationType.JSON,
-    compression: CompressionType = CompressionType.GZIP,
-) -> bytes:
-    """Build TTS protocol header"""
-    header = bytearray()
-    # byte 0: version (4 bits) + header size (4 bits)
-    header.append(0x11)  # version 1, header size 1 (4 bytes)
-    # byte 1: message type (4 bits) + flags (4 bits)
-    header.append((msg_type << 4) | 0x01)  # with sequence
-    # byte 2: serialization (4 bits) + compression (4 bits)
-    header.append((serialization << 4) | compression)
-    # byte 3: reserved
-    header.append(0x00)
-    return bytes(header)
-
-
-async def full_client_request(websocket, payload: bytes):
-    """Send a full client request"""
-    header = build_tts_header(MsgType.FullClientRequest)
-
-    # Compress payload
-    compressed = gzip.compress(payload)
-
-    # Build message: header + sequence (4 bytes) + payload size (4 bytes) + payload
-    msg = bytearray()
-    msg.extend(header)
-    msg.extend(struct.pack(">i", 1))  # sequence
-    msg.extend(struct.pack(">I", len(compressed)))
-    msg.extend(compressed)
-
-    await websocket.send(bytes(msg))
-
-
-def parse_tts_response(data: bytes) -> TTSMessage:
-    """Parse TTS response message"""
-    msg = TTSMessage(type=MsgType.FullServerResponse)
-
-    if len(data) < 4:
-        return msg
-
-    # Parse header
-    header_size = data[0] & 0x0F
-    msg_type = (data[1] >> 4) & 0x0F
-    flags = data[1] & 0x0F
-    serialization = (data[2] >> 4) & 0x0F
-    compression = data[2] & 0x0F
-
-    msg.type = MsgType(msg_type)
-    msg.serialization = serialization
-    msg.compression = compression
-
-    # Skip header
-    offset = header_size * 4
-
-    # Parse based on flags
-    if flags & 0x01:  # has sequence
-        offset += 4  # skip sequence
-
-    if flags & 0x04:  # has event
-        if offset + 4 <= len(data):
-            msg.event = struct.unpack(">i", data[offset : offset + 4])[0]
-            offset += 4
-
-    # Parse payload based on message type
-    if msg.type == MsgType.FullServerResponse:
-        if offset + 4 <= len(data):
-            payload_size = struct.unpack(">I", data[offset : offset + 4])[0]
-            offset += 4
-            if offset + payload_size <= len(data):
-                payload = data[offset : offset + payload_size]
-                if compression == CompressionType.GZIP:
-                    try:
-                        payload = gzip.decompress(payload)
-                    except Exception:
-                        pass
-                msg.payload = payload
-
-    elif msg.type == MsgType.AudioOnlyServer:
-        if offset + 4 <= len(data):
-            payload_size = struct.unpack(">I", data[offset : offset + 4])[0]
-            offset += 4
-            if offset + payload_size <= len(data):
-                msg.payload = data[offset : offset + payload_size]
-
-    elif msg.type == MsgType.ErrorResponse:
-        if offset + 4 <= len(data):
-            msg.error_code = struct.unpack(">i", data[offset : offset + 4])[0]
-            offset += 4
-        if offset + 4 <= len(data):
-            error_size = struct.unpack(">I", data[offset : offset + 4])[0]
-            offset += 4
-            if offset + error_size <= len(data):
-                error_data = data[offset : offset + error_size]
-                if compression == CompressionType.GZIP:
-                    try:
-                        error_data = gzip.decompress(error_data)
-                    except Exception:
-                        pass
-                try:
-                    msg.error_message = error_data.decode("utf-8")
-                except Exception:
-                    pass
-
-    return msg
-
-
-def _log_server_message(msg: TTSMessage) -> None:
+def _log_server_message(msg) -> None:
     if not msg.payload:
         return
     try:
@@ -241,27 +88,24 @@ def _log_server_message(msg: TTSMessage) -> None:
         logger.info("TTS server response (raw): %s", text)
 
 
-async def receive_message(websocket) -> TTSMessage:
-    """Receive and parse a TTS message"""
-    data = await websocket.recv()
-    if isinstance(data, bytes):
-        return parse_tts_response(data)
-    return TTSMessage(
-        type=MsgType.ErrorResponse, error_message="Unexpected message type"
-    )
-
-
 class TTSService:
     """ByteDance/Volcano TTS Service"""
 
     WS_URL = "wss://openspeech.bytedance.com/api/v3/tts/unidirectional/stream"
-    RESOURCE_ID = "seed-tts-2.0"
 
     def __init__(self):
         self.app_id = settings.volc_app_id
         self.access_token = settings.volc_access_token
         self.voice_type = settings.volc_tts_voice_type
         self.sample_rate = settings.volc_tts_sample_rate
+        self.resource_id = settings.volc_tts_resource_id
+
+    def _get_resource_id(self) -> str:
+        if self.resource_id:
+            return self.resource_id
+        if self.voice_type.startswith("S_"):
+            return "volc.megatts.default"
+        return "volc.service_type.10029"
 
     async def synthesize_stream(
         self,
@@ -289,7 +133,7 @@ class TTSService:
         headers = {
             "X-Api-App-Key": self.app_id,
             "X-Api-Access-Key": self.access_token,
-            "X-Api-Resource-Id": self.RESOURCE_ID,
+            "X-Api-Resource-Id": self._get_resource_id(),
             "X-Api-Connect-Id": str(uuid.uuid4()),
         }
 
@@ -297,7 +141,6 @@ class TTSService:
             async with websockets.connect(
                 self.WS_URL, extra_headers=headers, max_size=10 * 1024 * 1024
             ) as websocket:
-                logged_audio_chunk = False
                 # Build request
                 request = {
                     "user": {
@@ -306,7 +149,7 @@ class TTSService:
                     "req_params": {
                         "speaker": self.voice_type,
                         "audio_params": {
-                            "format": "mp3",
+                            "format": "pcm",
                             "sample_rate": self.sample_rate,
                             "enable_timestamp": False,
                         },
@@ -346,10 +189,14 @@ class TTSService:
                     elif msg.type == MsgType.AudioOnlyServer:
                         if msg.payload:
                             yield msg.payload
-                    elif msg.type == MsgType.ErrorResponse:
-                        raise RuntimeError(
-                            f"TTS error (code {msg.error_code}): {msg.error_message}"
-                        )
+                    elif msg.type == MsgType.Error:
+                        err = ""
+                        if msg.payload:
+                            try:
+                                err = msg.payload.decode("utf-8", "ignore")
+                            except Exception:
+                                err = ""
+                        raise RuntimeError(f"TTS error (code {msg.error_code}): {err}")
 
         except Exception as e:
             logger.error(f"TTS stream error: {e}")

@@ -65,9 +65,13 @@ class ImageData(BaseModel):
 # Server -> Client message data models
 class ServerAudioData(BaseModel):
     """Server audio response data"""
-    audio: str  # base64 encoded audio (mp3)
+    audio: str  # base64 encoded audio
     segment_id: int
     is_final: bool = False
+    format: Optional[str] = None  # audio encoding, e.g. pcm/mp3
+    sample_rate: Optional[int] = None
+    channels: Optional[int] = None
+    bits_per_sample: Optional[int] = None
 
 
 class TranscriptData(BaseModel):
@@ -118,6 +122,10 @@ class ServerMessage(BaseModel):
         audio_data: str,
         segment_id: int,
         is_final: bool = False,
+        format: Optional[str] = None,
+        sample_rate: Optional[int] = None,
+        channels: Optional[int] = None,
+        bits_per_sample: Optional[int] = None,
     ) -> "ServerMessage":
         """Create audio message"""
         return cls(
@@ -126,6 +134,10 @@ class ServerMessage(BaseModel):
                 "audio": audio_data,
                 "segment_id": segment_id,
                 "is_final": is_final,
+                "format": format,
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "bits_per_sample": bits_per_sample,
             },
         )
 

@@ -47,6 +47,7 @@ class Settings(BaseSettings):
     # ByteDance/Volcano Engine - TTS
     volc_tts_voice_type: str = "zh_female_tianmeixiaoyuan_moon_bigtts"  # Default voice
     volc_tts_sample_rate: int = 24000
+    volc_tts_resource_id: Optional[str] = None
 
     # Doubao LLM
     doubao_api_key: Optional[str] = None

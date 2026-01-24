@@ -185,6 +185,7 @@ async def handle_text_message(
         async for segment in ai_agent.process_text_with_segments(
             conversation_id,
             content,
+            with_tts=False,
         ):
             # Check for interrupt
             if await check_interrupt(conversation_id):
@@ -205,15 +206,56 @@ async def handle_text_message(
                 ),
             )
 
-            if segment.audio_base64:
-                await connection_manager.send_message(
-                    conversation_id,
-                    ServerMessage.audio(
-                        audio_data=segment.audio_base64,
-                        segment_id=segment.segment_id,
-                        is_final=True,
-                    ),
-                )
+            if segment.speech:
+                pending_b64 = None
+                interrupted = False
+                try:
+                    async for chunk in ai_agent.tts.synthesize_stream(
+                        segment.speech,
+                        interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
+                    ):
+                        if await check_interrupt(conversation_id):
+                            logger.info(
+                                "Streaming TTS interrupted for conversation %s",
+                                conversation_id,
+                            )
+                            interrupted = True
+                            break
+                        b64 = base64.b64encode(chunk).decode("utf-8")
+                        if pending_b64 is not None:
+                            await connection_manager.send_message(
+                                conversation_id,
+                                ServerMessage.audio(
+                                    audio_data=pending_b64,
+                                    segment_id=segment.segment_id,
+                                    is_final=False,
+                                    format="pcm",
+                                    sample_rate=ai_agent.tts.sample_rate,
+                                    channels=1,
+                                    bits_per_sample=16,
+                                ),
+                            )
+                        pending_b64 = b64
+                except Exception as e:
+                    logger.error(
+                        "Streaming TTS error for segment %s: %s",
+                        segment.segment_id,
+                        e,
+                    )
+
+                if pending_b64 is not None and not interrupted:
+                    await connection_manager.send_message(
+                        conversation_id,
+                        ServerMessage.audio(
+                            audio_data=pending_b64,
+                            segment_id=segment.segment_id,
+                            is_final=True,
+                            format="pcm",
+                            sample_rate=ai_agent.tts.sample_rate,
+                            channels=1,
+                            bits_per_sample=16,
+                        ),
+                    )
 
             segment_count += 1
 

@@ -585,6 +585,7 @@ class AIAgent:
         self,
         conversation_id: int,
         text: str,
+        with_tts: bool = True,
         on_segment: Optional[Callable[[Segment], Any]] = None,
     ) -> AsyncGenerator[Segment, None]:
         """
@@ -593,12 +594,13 @@ class AIAgent:
         This is the new segment-based pipeline that:
         1. Sends user text to LLM
         2. Parses LLM output in [S]...[/S][B]...[/B] format
-        3. Generates TTS for each segment's speech
-        4. Yields complete segments with audio
+        3. Optionally generates TTS for each segment's speech
+        4. Yields complete segments with audio (if enabled)
 
         Args:
             conversation_id: Conversation ID
             text: User's text input
+            with_tts: Whether to generate audio for each segment
             on_segment: Callback for each complete segment
 
         Yields:
@@ -673,8 +675,8 @@ class AIAgent:
                             logger.info(f"Segment generation interrupted for {conversation_id}")
                             return
 
-                        # Generate TTS for speech
-                        if segment.speech:
+                        # Generate TTS for speech when enabled
+                        if with_tts and segment.speech:
                             try:
                                 audio_data = await self.tts.synthesize(segment.speech)
                                 if audio_data:
@@ -695,8 +697,8 @@ class AIAgent:
             final_segment = parser.finalize()
             if final_segment:
                 if not await self.check_interrupt(conversation_id):
-                    # Generate TTS for final segment
-                    if final_segment.speech:
+                    # Generate TTS for final segment when enabled
+                    if with_tts and final_segment.speech:
                         try:
                             audio_data = await self.tts.synthesize(final_segment.speech)
                             if audio_data:
@@ -715,7 +717,7 @@ class AIAgent:
                 if extracted:
                     for segment in extracted:
                         try:
-                            if segment.speech:
+                            if with_tts and segment.speech:
                                 audio_data = await self.tts.synthesize(segment.speech)
                                 if audio_data:
                                     segment.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
@@ -732,9 +734,10 @@ class AIAgent:
                         board=":::note{color=yellow}\n未生成板书，以下为老师讲解\n:::",
                     )
                     try:
-                        audio_data = await self.tts.synthesize(fallback.speech)
-                        if audio_data:
-                            fallback.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                        if with_tts:
+                            audio_data = await self.tts.synthesize(fallback.speech)
+                            if audio_data:
+                                fallback.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
                     except Exception as e:
                         logger.error(f"TTS error for fallback segment: {e}")
                     if on_segment:
