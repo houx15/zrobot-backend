@@ -523,6 +523,14 @@ async def websocket_endpoint(
 
     # Send initial idle state
     await send_state_change(conversation_id, ConversationState.IDLE)
+    # Kick off initial assistant response if configured
+    try:
+        initial_msg = await redis_client.hget(f"conv:session:{conversation_id}", "initial_user_message")
+        if initial_msg:
+            await redis_client.hdel(f"conv:session:{conversation_id}", "initial_user_message")
+            asyncio.create_task(handle_text_message(conversation_id, initial_msg))
+    except Exception as e:
+        logger.error(f"Failed to send initial message for conversation {conversation_id}: {e}")
 
     try:
         while True:

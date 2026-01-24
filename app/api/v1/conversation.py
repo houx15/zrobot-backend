@@ -216,6 +216,10 @@ async def create_conversation(
         "last_active_at": datetime.now(timezone.utc).isoformat(),
         "tts_playing": "false",
     }
+    if request.type == "solving" and request.question_history_id is not None:
+        session_data["initial_user_message"] = "这道题该怎么做呀"
+    elif request.type == "chat":
+        session_data["initial_user_message"] = "你好呀"
     await redis.hmset(f"conv:session:{conversation.id}", session_data)
     await redis.expire(f"conv:session:{conversation.id}", WS_TOKEN_EXPIRE_SECONDS)
 
