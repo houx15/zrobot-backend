@@ -414,13 +414,24 @@ class AIAgent:
             return
 
         # Build system prompt
-        question_context = build_question_context(
-            question_text=context.question_text,
-            question_image_url=context.question_image_url,
-            user_answer=context.user_answer,
-            correct_answer=context.correct_answer,
-            analysis=context.analysis,
-        )
+        # Only build question context if there's question-related data
+        has_question_data = any([
+            context.question_text,
+            context.question_image_url,
+            context.user_answer,
+            context.correct_answer,
+            context.analysis,
+        ])
+
+        question_context = ""
+        if has_question_data:
+            question_context = build_question_context(
+                question_text=context.question_text,
+                question_image_url=context.question_image_url,
+                user_answer=context.user_answer,
+                correct_answer=context.correct_answer,
+                analysis=context.analysis,
+            )
 
         context_vars = {
             "student_name": context.student_name,
@@ -649,13 +660,24 @@ class AIAgent:
         )
 
         # Build system prompt
-        question_context = build_question_context(
-            question_text=context.question_text,
-            question_image_url=context.question_image_url,
-            user_answer=context.user_answer,
-            correct_answer=context.correct_answer,
-            analysis=context.analysis,
-        )
+        # Only build question context if there's question-related data
+        has_question_data = any([
+            context.question_text,
+            context.question_image_url,
+            context.user_answer,
+            context.correct_answer,
+            context.analysis,
+        ])
+
+        question_context = ""
+        if has_question_data:
+            question_context = build_question_context(
+                question_text=context.question_text,
+                question_image_url=context.question_image_url,
+                user_answer=context.user_answer,
+                correct_answer=context.correct_answer,
+                analysis=context.analysis,
+            )
 
         context_vars = {
             "student_name": context.student_name,
