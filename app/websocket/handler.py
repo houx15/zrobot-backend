@@ -210,6 +210,13 @@ async def handle_text_message(
                 await send_state_change(conversation_id, ConversationState.SPEAKING)
 
             # Send segment_start (speech only, board will be sent after audio ends)
+            logger.info(
+                "[ws.segment] start conv_id=%s segment_id=%s speech_len=%s board_len=%s",
+                conversation_id,
+                segment.segment_id,
+                len(segment.speech) if segment.speech else 0,
+                len(segment.board) if segment.board else 0,
+            )
             await connection_manager.send_message(
                 conversation_id,
                 ServerMessage.segment_start(
@@ -275,6 +282,13 @@ async def handle_text_message(
                     tick_interval = 0.1  # 100ms
 
                     offset = 0
+                    delta_count = 0
+                    logger.info(
+                        "[ws.transcript] start conv_id=%s segment_id=%s speech_len=%s",
+                        conversation_id,
+                        segment.segment_id,
+                        len(speech),
+                    )
                     while offset < len(speech) and not stop_event.is_set():
                         # Send next chunk of characters
                         end = min(offset + chars_per_tick, len(speech))
@@ -288,10 +302,19 @@ async def handle_text_message(
                                 offset=offset,
                             ),
                         )
+                        delta_count += 1
 
                         offset = end
                         if offset < len(speech):
                             await asyncio.sleep(tick_interval)
+
+                    logger.info(
+                        "[ws.transcript] done conv_id=%s segment_id=%s deltas=%s stopped=%s",
+                        conversation_id,
+                        segment.segment_id,
+                        delta_count,
+                        stop_event.is_set(),
+                    )
 
                 # Run TTS streaming and transcript pacer concurrently
                 await asyncio.gather(
@@ -312,6 +335,12 @@ async def handle_text_message(
 
             # Send board after audio ends (or immediately if no speech)
             if segment.board and not await check_interrupt(conversation_id):
+                logger.info(
+                    "[ws.board] send conv_id=%s segment_id=%s board_len=%s",
+                    conversation_id,
+                    segment.segment_id,
+                    len(segment.board),
+                )
                 await connection_manager.send_message(
                     conversation_id,
                     ServerMessage.board(
