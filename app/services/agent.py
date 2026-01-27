@@ -25,6 +25,7 @@ logger = logging.getLogger(__name__)
 @dataclass
 class ConversationContext:
     """Conversation context and state"""
+
     conversation_id: int
     user_id: int
     conversation_type: str  # "solving" or "chat"
@@ -43,6 +44,7 @@ class ConversationContext:
 @dataclass
 class AgentResponse:
     """Agent response data"""
+
     text: str
     audio_base64: Optional[str] = None
     is_final: bool = False
@@ -51,6 +53,7 @@ class AgentResponse:
 @dataclass
 class Segment:
     """A segment containing paired speech and board content"""
+
     segment_id: int
     speech: str
     board: str
@@ -99,7 +102,7 @@ class SegmentParser:
             if not self.in_speech and not self.in_board:
                 s_start = self.buffer.find("[S]")
                 if s_start != -1:
-                    self.buffer = self.buffer[s_start + 3:]
+                    self.buffer = self.buffer[s_start + 3 :]
                     self.in_speech = True
                     self.current_speech = ""
                 else:
@@ -110,7 +113,7 @@ class SegmentParser:
                 s_end = self.buffer.find("[/S]")
                 if s_end != -1:
                     self.current_speech = self.buffer[:s_end].strip()
-                    self.buffer = self.buffer[s_end + 4:]
+                    self.buffer = self.buffer[s_end + 4 :]
                     self.in_speech = False
                 else:
                     break
@@ -119,7 +122,7 @@ class SegmentParser:
             if not self.in_speech and not self.in_board and self.current_speech:
                 b_start = self.buffer.find("[B]")
                 if b_start != -1:
-                    self.buffer = self.buffer[b_start + 3:]
+                    self.buffer = self.buffer[b_start + 3 :]
                     self.in_board = True
                     self.current_board = ""
                 else:
@@ -143,7 +146,7 @@ class SegmentParser:
                 b_end = self.buffer.find("[/B]")
                 if b_end != -1:
                     self.current_board = self.buffer[:b_end].strip()
-                    self.buffer = self.buffer[b_end + 4:]
+                    self.buffer = self.buffer[b_end + 4 :]
                     self.in_board = False
 
                     # Emit complete segment
@@ -255,16 +258,20 @@ class AIAgent:
         vars_data = await redis_client.hgetall(f"conv:vars:{conversation_id}")
 
         # Get message history
-        messages_raw = await redis_client.lrange(f"conv:messages:{conversation_id}", 0, -1)
+        messages_raw = await redis_client.lrange(
+            f"conv:messages:{conversation_id}", 0, -1
+        )
         history = []
         for msg_str in messages_raw:
             try:
                 msg = json.loads(msg_str)
                 if msg.get("type") == "text":
-                    history.append(Message(
-                        role=msg.get("role", "user"),
-                        content=msg.get("content", ""),
-                    ))
+                    history.append(
+                        Message(
+                            role=msg.get("role", "user"),
+                            content=msg.get("content", ""),
+                        )
+                    )
             except Exception:
                 pass
 
@@ -312,7 +319,9 @@ class AIAgent:
     async def _get_previous_response_id(self, conversation_id: int) -> Optional[str]:
         return await redis_client.get(f"conv:llm:resp_id:{conversation_id}")
 
-    async def _set_previous_response_id(self, conversation_id: int, response_id: str) -> None:
+    async def _set_previous_response_id(
+        self, conversation_id: int, response_id: str
+    ) -> None:
         if not response_id:
             return
         await redis_client.set(
@@ -439,7 +448,9 @@ class AIAgent:
                 user_message=user_text,
                 history=context.history,
                 previous_response_id=previous_response_id,
-                on_response_id=lambda rid: self._set_previous_response_id(conversation_id, rid),
+                on_response_id=lambda rid: self._set_previous_response_id(
+                    conversation_id, rid
+                ),
                 interrupt_check=lambda: self.check_interrupt(conversation_id),
             ):
                 if chunk.content:
@@ -477,6 +488,7 @@ class AIAgent:
         Yields:
             Audio data chunks
         """
+
         async def interrupt_check():
             return await self.check_interrupt(conversation_id)
 
@@ -619,7 +631,7 @@ class AIAgent:
             yield Segment(
                 segment_id=0,
                 speech="抱歉，会话已过期，请重新开始。",
-                board=":::note{color=yellow}\n会话已过期\n:::",
+                board=None,
             )
             return
 
@@ -667,6 +679,7 @@ class AIAgent:
         previous_response_id = await self._get_previous_response_id(conversation_id)
 
         try:
+
             async def _on_response_id(rid: str) -> None:
                 await self._set_previous_response_id(conversation_id, rid)
                 logger.info(
@@ -694,7 +707,9 @@ class AIAgent:
                     for segment in segments:
                         # Check for interrupt
                         if await self.check_interrupt(conversation_id):
-                            logger.info(f"Segment generation interrupted for {conversation_id}")
+                            logger.info(
+                                f"Segment generation interrupted for {conversation_id}"
+                            )
                             return
 
                         # Generate TTS for speech when enabled
@@ -702,9 +717,13 @@ class AIAgent:
                             try:
                                 audio_data = await self.tts.synthesize(segment.speech)
                                 if audio_data:
-                                    segment.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                                    segment.audio_base64 = base64.b64encode(
+                                        audio_data
+                                    ).decode("utf-8")
                             except Exception as e:
-                                logger.error(f"TTS error for segment {segment.segment_id}: {e}")
+                                logger.error(
+                                    f"TTS error for segment {segment.segment_id}: {e}"
+                                )
 
                         # Emit segment
                         if on_segment:
@@ -724,7 +743,9 @@ class AIAgent:
                         try:
                             audio_data = await self.tts.synthesize(final_segment.speech)
                             if audio_data:
-                                final_segment.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                                final_segment.audio_base64 = base64.b64encode(
+                                    audio_data
+                                ).decode("utf-8")
                         except Exception as e:
                             logger.error(f"TTS error for final segment: {e}")
 
@@ -734,7 +755,11 @@ class AIAgent:
                     emitted_segments += 1
 
             # Fallback: if no segments were parsed, try regex extraction from full response
-            if emitted_segments == 0 and full_response and not await self.check_interrupt(conversation_id):
+            if (
+                emitted_segments == 0
+                and full_response
+                and not await self.check_interrupt(conversation_id)
+            ):
                 extracted = extract_segments_from_text(full_response)
                 if extracted:
                     for segment in extracted:
@@ -742,7 +767,9 @@ class AIAgent:
                             if with_tts and segment.speech:
                                 audio_data = await self.tts.synthesize(segment.speech)
                                 if audio_data:
-                                    segment.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                                    segment.audio_base64 = base64.b64encode(
+                                        audio_data
+                                    ).decode("utf-8")
                         except Exception as e:
                             logger.error(f"TTS error for extracted segment: {e}")
                         if on_segment:
@@ -753,13 +780,15 @@ class AIAgent:
                     fallback = Segment(
                         segment_id=0,
                         speech=full_response.strip(),
-                        board=":::note{color=yellow}\n未生成板书，以下为老师讲解\n:::",
+                        board=None,
                     )
                     try:
                         if with_tts:
                             audio_data = await self.tts.synthesize(fallback.speech)
                             if audio_data:
-                                fallback.audio_base64 = base64.b64encode(audio_data).decode("utf-8")
+                                fallback.audio_base64 = base64.b64encode(
+                                    audio_data
+                                ).decode("utf-8")
                     except Exception as e:
                         logger.error(f"TTS error for fallback segment: {e}")
                     if on_segment:
@@ -785,7 +814,7 @@ class AIAgent:
             error_segment = Segment(
                 segment_id=0,
                 speech="抱歉，我遇到了一些问题，请稍后再试。",
-                board=":::note{color=yellow}\n处理出错，请重试\n:::",
+                board=None,
             )
             yield error_segment
 

@@ -102,20 +102,35 @@ class LLMService:
             return None
 
         client = self._get_client()
-        input_payload = [{"role": m.role, "content": m.content} for m in messages]
 
-        response = await client.responses.create(
+        # Build messages list with system instruction if provided
+        api_messages = []
+        if instructions:
+            api_messages.append({"role": "system", "content": instructions})
+        api_messages.extend([{"role": m.role, "content": m.content} for m in messages])
+
+        response = await client.chat.completions.create(
             model=self.model_id,
-            input=input_payload,
-            previous_response_id=previous_response_id,
-            instructions=instructions,
-            thinking={"type": "disabled"},
+            messages=api_messages,
         )
-        data = self._response_to_dict(response)
+
+        content = ""
+        if response.choices and len(response.choices) > 0:
+            content = response.choices[0].message.content or ""
+
+        usage = None
+        if response.usage:
+            usage = {
+                "prompt_tokens": response.usage.prompt_tokens,
+                "completion_tokens": response.usage.completion_tokens,
+                "total_tokens": response.usage.total_tokens,
+            }
+
         return LLMResponse(
-            content=self._extract_response_text(response),
-            usage=data.get("usage"),
-            response_id=data.get("id"),
+            content=content,
+            finish_reason=response.choices[0].finish_reason if response.choices else None,
+            usage=usage,
+            response_id=response.id,
         )
 
     async def chat(
