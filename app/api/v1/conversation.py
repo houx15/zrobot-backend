@@ -160,7 +160,7 @@ async def summarize_conversation_topic(messages: list) -> Optional[str]:
         return None
 
     system_prompt = (
-        "你是一个对话摘要助手，请用10字以内概括对话主题。"
+        "你是一个对话摘要助手，请用10字以内概括AI和孩子的对话，成为方便给家长汇报的主题。"
         "只输出主题短语，不要标点，不要解释。"
     )
     response = await llm_service.chat(

@@ -98,51 +98,36 @@ class SegmentParser:
         segments = []
 
         while True:
-            # Look for [S] start tag
-            if not self.in_speech and not self.in_board:
-                s_start = self.buffer.find("[S]")
-                if s_start != -1:
-                    self.buffer = self.buffer[s_start + 3 :]
-                    self.in_speech = True
-                    self.current_speech = ""
-                else:
-                    break
-
-            # Look for [/S] end tag
-            if self.in_speech:
-                s_end = self.buffer.find("[/S]")
-                if s_end != -1:
-                    self.current_speech = self.buffer[:s_end].strip()
-                    self.buffer = self.buffer[s_end + 4 :]
-                    self.in_speech = False
-                else:
-                    break
-
-            # Look for [B] start tag (optional for simple replies)
+            # Priority 1: If we have speech and waiting for board, look for [B] FIRST
+            # This prevents losing the previous segment when a new [S] arrives
             if not self.in_speech and not self.in_board and self.current_speech:
                 b_start = self.buffer.find("[B]")
-                if b_start != -1:
+                next_s = self.buffer.find("[S]")
+
+                if b_start != -1 and (next_s == -1 or b_start < next_s):
+                    # Found [B] before next [S] - process board
                     self.buffer = self.buffer[b_start + 3 :]
                     self.in_board = True
                     self.current_board = ""
+                    # Continue to process [/B]
+                elif next_s != -1:
+                    # Found next [S] without [B] - emit speech-only segment first
+                    segment = Segment(
+                        segment_id=self.current_segment_id,
+                        speech=self.current_speech,
+                        board="",
+                    )
+                    segments.append(segment)
+                    self.current_segment_id += 1
+                    self.current_speech = ""
+                    # Continue loop to process the new [S]
+                    continue
                 else:
-                    next_s = self.buffer.find("[S]")
-                    if next_s != -1:
-                        # Emit speech-only segment before next [S]
-                        segment = Segment(
-                            segment_id=self.current_segment_id,
-                            speech=self.current_speech,
-                            board="",
-                        )
-                        segments.append(segment)
-                        self.current_segment_id += 1
-                        self.current_speech = ""
-                        # Continue loop to process the next [S]
-                        continue
+                    # Neither [B] nor [S] found - wait for more data
                     break
 
-            # Look for [/B] end tag
-            if self.in_board:
+            # Priority 2: Look for [/B] end tag
+            elif self.in_board:
                 b_end = self.buffer.find("[/B]")
                 if b_end != -1:
                     self.current_board = self.buffer[:b_end].strip()
@@ -160,6 +145,26 @@ class SegmentParser:
                     self.current_segment_id += 1
                     self.current_speech = ""
                     self.current_board = ""
+                else:
+                    break
+
+            # Priority 3: Look for [/S] end tag
+            elif self.in_speech:
+                s_end = self.buffer.find("[/S]")
+                if s_end != -1:
+                    self.current_speech = self.buffer[:s_end].strip()
+                    self.buffer = self.buffer[s_end + 4 :]
+                    self.in_speech = False
+                else:
+                    break
+
+            # Priority 4: Look for [S] start tag (only when not waiting for anything)
+            elif not self.in_speech and not self.in_board:
+                s_start = self.buffer.find("[S]")
+                if s_start != -1:
+                    self.buffer = self.buffer[s_start + 3 :]
+                    self.in_speech = True
+                    self.current_speech = ""
                 else:
                     break
 
