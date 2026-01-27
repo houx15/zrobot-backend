@@ -175,6 +175,16 @@ async def handle_text_message(
     """
     await update_last_active(conversation_id)
 
+    preview = content.strip().replace("\n", " ")
+    if len(preview) > 200:
+        preview = preview[:200] + "..."
+    logger.info(
+        "[ws.text] recv conv_id=%s len=%s text=%s",
+        conversation_id,
+        len(content),
+        preview,
+    )
+
     # Send processing state
     await send_state_change(conversation_id, ConversationState.PROCESSING)
 

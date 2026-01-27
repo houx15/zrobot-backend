@@ -623,6 +623,19 @@ class AIAgent:
             )
             return
 
+        preview = text.strip().replace("\n", " ")
+        if len(preview) > 200:
+            preview = preview[:200] + "..."
+        logger.info(
+            "[ws.llm] start conv_id=%s user_id=%s type=%s history=%s user_len=%s user_text=%s",
+            conversation_id,
+            context.user_id,
+            context.conversation_type,
+            len(context.history),
+            len(text),
+            preview,
+        )
+
         # Build system prompt
         question_context = build_question_context(
             question_text=context.question_text,
@@ -654,12 +667,21 @@ class AIAgent:
         previous_response_id = await self._get_previous_response_id(conversation_id)
 
         try:
+            async def _on_response_id(rid: str) -> None:
+                await self._set_previous_response_id(conversation_id, rid)
+                logger.info(
+                    "[ws.llm] response_id conv_id=%s response_id=%s prev_response_id=%s",
+                    conversation_id,
+                    rid,
+                    previous_response_id,
+                )
+
             async for chunk in self.llm.generate_with_context(
                 system_prompt=system_prompt,
                 user_message=text,
                 history=context.history,
                 previous_response_id=previous_response_id,
-                on_response_id=lambda rid: self._set_previous_response_id(conversation_id, rid),
+                on_response_id=_on_response_id,
                 interrupt_check=lambda: self.check_interrupt(conversation_id),
             ):
                 if chunk.content:
@@ -747,6 +769,16 @@ class AIAgent:
             # Store assistant message (full response)
             if full_response:
                 await self.store_message(conversation_id, "assistant", full_response)
+                resp_preview = full_response.strip().replace("\n", " ")
+                if len(resp_preview) > 200:
+                    resp_preview = resp_preview[:200] + "..."
+                logger.info(
+                    "[ws.llm] done conv_id=%s resp_len=%s segments=%s resp_text=%s",
+                    conversation_id,
+                    len(full_response),
+                    emitted_segments,
+                    resp_preview,
+                )
 
         except Exception as e:
             logger.error(f"Segment generation error: {e}")
