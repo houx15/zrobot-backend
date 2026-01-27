@@ -18,8 +18,12 @@ class ClientMessageType(str, Enum):
 class ServerMessageType(str, Enum):
     """Server to client message types"""
     AUDIO = "audio"
+    AUDIO_END = "audio_end"  # Signals end of audio for a segment
     TRANSCRIPT = "transcript"
-    SEGMENT = "segment"  # New: speech + board segment
+    TRANSCRIPT_DELTA = "transcript_delta"  # Incremental speech text (typing effect)
+    SEGMENT = "segment"  # Full segment (speech + board) - legacy/fallback
+    SEGMENT_START = "segment_start"  # Segment begins (id + speech, no board yet)
+    BOARD = "board"  # Board content (sent after audio ends)
     STATE = "state"  # Conversation state update
     DONE = "done"
     ERROR = "error"
@@ -122,31 +126,50 @@ class ServerMessage(BaseModel):
         audio_data: str,
         segment_id: int,
         is_final: bool = False,
+        seq: Optional[int] = None,
         format: Optional[str] = None,
         sample_rate: Optional[int] = None,
         channels: Optional[int] = None,
         bits_per_sample: Optional[int] = None,
     ) -> "ServerMessage":
         """Create audio message"""
+        data = {
+            "audio": audio_data,
+            "segment_id": segment_id,
+            "is_final": is_final,
+            "format": format,
+            "sample_rate": sample_rate,
+            "channels": channels,
+            "bits_per_sample": bits_per_sample,
+        }
+        if seq is not None:
+            data["seq"] = seq
+        return cls(type=ServerMessageType.AUDIO, data=data)
+
+    @classmethod
+    def audio_end(cls, segment_id: int, total_chunks: int) -> "ServerMessage":
+        """Create audio end message - signals end of audio for a segment"""
         return cls(
-            type=ServerMessageType.AUDIO,
-            data={
-                "audio": audio_data,
-                "segment_id": segment_id,
-                "is_final": is_final,
-                "format": format,
-                "sample_rate": sample_rate,
-                "channels": channels,
-                "bits_per_sample": bits_per_sample,
-            },
+            type=ServerMessageType.AUDIO_END,
+            data={"segment_id": segment_id, "total_chunks": total_chunks},
         )
 
     @classmethod
     def transcript(cls, content: str, is_final: bool = False) -> "ServerMessage":
-        """Create transcript message"""
+        """Create transcript message (ASR result)"""
         return cls(
             type=ServerMessageType.TRANSCRIPT,
             data={"text": content, "is_final": is_final},
+        )
+
+    @classmethod
+    def transcript_delta(
+        cls, segment_id: int, delta: str, offset: int
+    ) -> "ServerMessage":
+        """Create transcript delta message - incremental speech text for typing effect"""
+        return cls(
+            type=ServerMessageType.TRANSCRIPT_DELTA,
+            data={"segment_id": segment_id, "delta": delta, "offset": offset},
         )
 
     @classmethod
@@ -156,7 +179,7 @@ class ServerMessage(BaseModel):
         speech: str,
         board: str,
     ) -> "ServerMessage":
-        """Create segment message with speech + board content"""
+        """Create full segment message with speech + board content (legacy/fallback)"""
         return cls(
             type=ServerMessageType.SEGMENT,
             data={
@@ -164,6 +187,22 @@ class ServerMessage(BaseModel):
                 "speech": speech,
                 "board": board,
             },
+        )
+
+    @classmethod
+    def segment_start(cls, segment_id: int, speech: str) -> "ServerMessage":
+        """Create segment start message - begins a segment, board sent later"""
+        return cls(
+            type=ServerMessageType.SEGMENT_START,
+            data={"segment_id": segment_id, "speech": speech},
+        )
+
+    @classmethod
+    def board(cls, segment_id: int, board: str) -> "ServerMessage":
+        """Create board message - sent after audio ends"""
+        return cls(
+            type=ServerMessageType.BOARD,
+            data={"segment_id": segment_id, "board": board},
         )
 
     @classmethod

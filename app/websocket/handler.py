@@ -170,7 +170,10 @@ async def handle_text_message(
     Flow:
     1. State: processing
     2. Call LLM service, parse [S]...[/S][B]...[/B] segments
-    3. For each segment: generate TTS, send segment + audio, state: speaking
+    3. For each segment:
+       a. Send segment_start (speech only, no board)
+       b. Concurrently: stream TTS audio + send transcript deltas (typing effect)
+       c. After audio ends: send board
     4. State: idle
     """
     await update_last_active(conversation_id)
@@ -206,66 +209,116 @@ async def handle_text_message(
             if segment_count == 0:
                 await send_state_change(conversation_id, ConversationState.SPEAKING)
 
-            # Send segment message
+            # Send segment_start (speech only, board will be sent after audio ends)
             await connection_manager.send_message(
                 conversation_id,
-                ServerMessage.segment(
+                ServerMessage.segment_start(
                     segment_id=segment.segment_id,
                     speech=segment.speech,
-                    board=segment.board,
                 ),
             )
 
             if segment.speech:
-                pending_b64 = None
-                interrupted = False
-                try:
-                    async for chunk in ai_agent.tts.synthesize_stream(
-                        segment.speech,
-                        interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
-                    ):
-                        if await check_interrupt(conversation_id):
-                            logger.info(
-                                "Streaming TTS interrupted for conversation %s",
-                                conversation_id,
-                            )
-                            interrupted = True
-                            break
-                        b64 = base64.b64encode(chunk).decode("utf-8")
-                        if pending_b64 is not None:
+                # Process TTS and transcript delta concurrently
+                stop_event = asyncio.Event()
+                audio_chunk_count = 0
+
+                async def tts_stream_sender():
+                    """Stream TTS audio chunks to client"""
+                    nonlocal audio_chunk_count
+                    seq = 0
+                    try:
+                        async for chunk in ai_agent.tts.synthesize_stream(
+                            segment.speech,
+                            interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
+                        ):
+                            if stop_event.is_set():
+                                break
+                            if await check_interrupt(conversation_id):
+                                logger.info(
+                                    "Streaming TTS interrupted for conversation %s",
+                                    conversation_id,
+                                )
+                                stop_event.set()
+                                break
+
+                            b64 = base64.b64encode(chunk).decode("utf-8")
                             await connection_manager.send_message(
                                 conversation_id,
                                 ServerMessage.audio(
-                                    audio_data=pending_b64,
+                                    audio_data=b64,
                                     segment_id=segment.segment_id,
                                     is_final=False,
+                                    seq=seq,
                                     format="pcm",
                                     sample_rate=ai_agent.tts.sample_rate,
                                     channels=1,
                                     bits_per_sample=16,
                                 ),
                             )
-                        pending_b64 = b64
-                except Exception as e:
-                    logger.error(
-                        "Streaming TTS error for segment %s: %s",
-                        segment.segment_id,
-                        e,
-                    )
+                            seq += 1
+                            audio_chunk_count += 1
+                    except Exception as e:
+                        logger.error(
+                            "Streaming TTS error for segment %s: %s",
+                            segment.segment_id,
+                            e,
+                        )
+                    finally:
+                        stop_event.set()
 
-                if pending_b64 is not None and not interrupted:
+                async def transcript_pacer():
+                    """Send transcript deltas at fixed pace for typing effect"""
+                    speech = segment.speech
+                    # Calculate pace: ~4 chars per 100ms for Chinese
+                    chars_per_tick = 4
+                    tick_interval = 0.1  # 100ms
+
+                    offset = 0
+                    while offset < len(speech) and not stop_event.is_set():
+                        # Send next chunk of characters
+                        end = min(offset + chars_per_tick, len(speech))
+                        delta = speech[offset:end]
+
+                        await connection_manager.send_message(
+                            conversation_id,
+                            ServerMessage.transcript_delta(
+                                segment_id=segment.segment_id,
+                                delta=delta,
+                                offset=offset,
+                            ),
+                        )
+
+                        offset = end
+                        if offset < len(speech):
+                            await asyncio.sleep(tick_interval)
+
+                # Run TTS streaming and transcript pacer concurrently
+                await asyncio.gather(
+                    tts_stream_sender(),
+                    transcript_pacer(),
+                    return_exceptions=True,
+                )
+
+                # Send audio_end after TTS completes
+                if not await check_interrupt(conversation_id):
                     await connection_manager.send_message(
                         conversation_id,
-                        ServerMessage.audio(
-                            audio_data=pending_b64,
+                        ServerMessage.audio_end(
                             segment_id=segment.segment_id,
-                            is_final=True,
-                            format="pcm",
-                            sample_rate=ai_agent.tts.sample_rate,
-                            channels=1,
-                            bits_per_sample=16,
+                            total_chunks=audio_chunk_count,
                         ),
                     )
+
+            # Send board after audio ends (or immediately if no speech)
+            if segment.board and not await check_interrupt(conversation_id):
+                await connection_manager.send_message(
+                    conversation_id,
+                    ServerMessage.board(
+                        segment_id=segment.segment_id,
+                        board=segment.board,
+                    ),
+                )
 
             segment_count += 1
 
