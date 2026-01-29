@@ -1,21 +1,18 @@
 """WebSocket endpoint handler for AI conversation"""
 
 from fastapi import WebSocket, WebSocketDisconnect, Query, Path
-from datetime import datetime, timezone, timedelta
+from datetime import datetime, timezone
 import json
 import asyncio
 import base64
 import logging
 from typing import Optional, Dict
 from collections import defaultdict
+from dataclasses import dataclass
+import math
 
 from app.websocket.manager import connection_manager
-from app.websocket.protocol import (
-    ClientMessage,
-    ClientMessageType,
-    ServerMessage,
-    ConversationState,
-)
+from app.websocket.protocol import WsEnvelope, ServerMessage, ConversationState
 from app.utils.security import decode_ws_token
 from app.redis_client import redis_client
 from app.services.agent import ai_agent
@@ -27,11 +24,37 @@ asr_queues: Dict[int, asyncio.Queue] = {}
 asr_tasks: Dict[int, asyncio.Task] = {}
 interrupt_flags: Dict[int, bool] = defaultdict(bool)
 listening_since: Dict[int, Optional[datetime]] = {}  # Track when entered LISTENING state
-forced_end_until: Dict[int, datetime] = {}
+conv_states: Dict[int, ConversationState] = {}
+tts_last_chunk_sent_at: Dict[int, datetime] = {}
+current_stream_id: Dict[int, str] = {}
+
+@dataclass
+class AudioConfig:
+    format: str = "pcm_s16le"
+    sample_rate: int = 16000
+    channels: int = 1
+    bits_per_sample: int = 16
+    frame_ms: int = 20
+
+
+@dataclass
+class VADState:
+    in_speech: bool = False
+    silence_ms: float = 0.0
+    noise_floor_db: float = -50.0
+    barge_in_frames: int = 0
+    last_frame_at: Optional[datetime] = None
+
+
+audio_configs: Dict[int, AudioConfig] = {}
+vad_states: Dict[int, VADState] = {}
 IDLE_TIMEOUT_SECONDS = 60
 LISTENING_TIMEOUT_SECONDS = 60  # End conversation if no audio for 1 minute in LISTENING state
-PARTIAL_STABLE_SECONDS = 1.5
-FORCED_END_GRACE_SECONDS = 2.0
+END_SILENCE_MS = 1500
+SPEECH_DB_ABOVE_NOISE = 10.0
+BARGE_IN_DB_ABOVE_NOISE = 15.0
+BARGE_IN_MIN_MS = 200
+PLAYBACK_ECHO_WINDOW_MS = 1200
 
 
 async def verify_connection(
@@ -137,8 +160,9 @@ async def send_state_change(conversation_id: int, state: ConversationState) -> N
     """Send state change message to client"""
     await connection_manager.send_message(
         conversation_id,
-        ServerMessage.state(state.value),
+        ServerMessage.state(conversation_id, state.value),
     )
+    conv_states[conversation_id] = state
     # Also update Redis session state
     await redis_client.hset(
         f"conv:session:{conversation_id}",
@@ -154,10 +178,42 @@ async def send_state_change(conversation_id: int, state: ConversationState) -> N
 
 async def handle_ping(
     conversation_id: int,
-) -> ServerMessage:
+) -> WsEnvelope:
     """Handle ping message, return pong"""
     await update_last_active(conversation_id)
-    return ServerMessage.pong()
+    return ServerMessage.pong(conversation_id)
+
+
+def _get_audio_config(conversation_id: int) -> AudioConfig:
+    return audio_configs.get(conversation_id, AudioConfig())
+
+
+def _get_vad_state(conversation_id: int) -> VADState:
+    if conversation_id not in vad_states:
+        vad_states[conversation_id] = VADState()
+    return vad_states[conversation_id]
+
+
+def _pcm_rms_db(pcm_bytes: bytes) -> float:
+    if len(pcm_bytes) < 2:
+        return -100.0
+    sample_count = len(pcm_bytes) // 2
+    sum_squares = 0
+    for i in range(0, sample_count * 2, 2):
+        sample = int.from_bytes(pcm_bytes[i : i + 2], "little", signed=True)
+        sum_squares += sample * sample
+    rms = math.sqrt(sum_squares / max(1, sample_count))
+    if rms <= 0:
+        return -100.0
+    return 20.0 * math.log10(rms / 32768.0)
+
+
+def _estimate_frame_ms(pcm_bytes: bytes, config: AudioConfig) -> float:
+    bytes_per_sample = max(1, config.bits_per_sample // 8)
+    bytes_per_sec = config.sample_rate * config.channels * bytes_per_sample
+    if bytes_per_sec <= 0:
+        return config.frame_ms
+    return max(1.0, (len(pcm_bytes) / bytes_per_sec) * 1000.0)
 
 
 async def handle_text_message(
@@ -171,10 +227,10 @@ async def handle_text_message(
     1. State: processing
     2. Call LLM service, parse [S]...[/S][B]...[/B] segments
     3. For each segment:
-       a. Send segment_start (speech only, no board)
-       b. Concurrently: stream TTS audio + send transcript deltas (typing effect)
-       c. After audio ends: send board
-    4. State: idle
+       a. Send segment_start
+       b. Stream TTS audio (audio_chunk) + ai_text_delta driven by TTS sentence events
+       c. After audio_end: send board
+    4. State: listening
     """
     await update_last_active(conversation_id)
 
@@ -192,24 +248,24 @@ async def handle_text_message(
     await send_state_change(conversation_id, ConversationState.PROCESSING)
 
     segment_count = 0
+    interrupted = False
 
     try:
-        # Process through AI agent with segment-based pipeline
         async for segment in ai_agent.process_text_with_segments(
             conversation_id,
             content,
             with_tts=False,
         ):
-            # Check for interrupt
             if await check_interrupt(conversation_id):
-                logger.info(f"Segment response interrupted for conversation {conversation_id}")
+                logger.info(
+                    "Segment response interrupted for conversation %s", conversation_id
+                )
+                interrupted = True
                 break
 
-            # Update state to speaking when sending first segment
             if segment_count == 0:
                 await send_state_change(conversation_id, ConversationState.SPEAKING)
 
-            # Send segment_start (speech only, board will be sent after audio ends)
             logger.info(
                 "[ws.segment] start conv_id=%s segment_id=%s speech_len=%s board_len=%s",
                 conversation_id,
@@ -220,121 +276,69 @@ async def handle_text_message(
             await connection_manager.send_message(
                 conversation_id,
                 ServerMessage.segment_start(
+                    conv_id=conversation_id,
                     segment_id=segment.segment_id,
-                    speech=segment.speech,
+                    index=segment_count,
                 ),
             )
 
             if segment.speech:
-                # Process TTS and transcript delta concurrently
-                stop_event = asyncio.Event()
-                audio_chunk_count = 0
+                audio_seq = 0
+                text_seq = 0
+                async for ev in ai_agent.tts.synthesize_stream_events(
+                    segment.speech,
+                    interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
+                ):
+                    if await check_interrupt(conversation_id):
+                        interrupted = True
+                        break
 
-                async def tts_stream_sender():
-                    """Stream TTS audio chunks to client"""
-                    nonlocal audio_chunk_count
-                    seq = 0
-                    try:
-                        async for chunk in ai_agent.tts.synthesize_stream(
-                            segment.speech,
-                            interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
-                        ):
-                            if stop_event.is_set():
-                                break
-                            if await check_interrupt(conversation_id):
-                                logger.info(
-                                    "Streaming TTS interrupted for conversation %s",
-                                    conversation_id,
-                                )
-                                stop_event.set()
-                                break
-
-                            b64 = base64.b64encode(chunk).decode("utf-8")
+                    if ev.name == "sentence_start":
+                        if ev.text:
                             await connection_manager.send_message(
                                 conversation_id,
-                                ServerMessage.audio(
-                                    audio_data=b64,
+                                ServerMessage.ai_text_delta(
+                                    conv_id=conversation_id,
                                     segment_id=segment.segment_id,
-                                    is_final=False,
-                                    seq=seq,
-                                    format="pcm",
-                                    sample_rate=ai_agent.tts.sample_rate,
-                                    channels=1,
-                                    bits_per_sample=16,
+                                    seq=text_seq,
+                                    delta=ev.text,
                                 ),
                             )
-                            seq += 1
-                            audio_chunk_count += 1
-                    except Exception as e:
-                        logger.error(
-                            "Streaming TTS error for segment %s: %s",
-                            segment.segment_id,
-                            e,
-                        )
-                    finally:
-                        stop_event.set()
-
-                async def transcript_pacer():
-                    """Send transcript deltas at fixed pace for typing effect"""
-                    speech = segment.speech
-                    # Calculate pace: ~4 chars per 100ms for Chinese
-                    chars_per_tick = 4
-                    tick_interval = 0.1  # 100ms
-
-                    offset = 0
-                    delta_count = 0
-                    logger.info(
-                        "[ws.transcript] start conv_id=%s segment_id=%s speech_len=%s",
-                        conversation_id,
-                        segment.segment_id,
-                        len(speech),
-                    )
-                    while offset < len(speech) and not stop_event.is_set():
-                        # Send next chunk of characters
-                        end = min(offset + chars_per_tick, len(speech))
-                        delta = speech[offset:end]
-
+                            text_seq += 1
+                    elif ev.name == "audio":
+                        b64 = base64.b64encode(ev.audio or b"").decode("utf-8")
                         await connection_manager.send_message(
                             conversation_id,
-                            ServerMessage.transcript_delta(
+                            ServerMessage.audio_chunk(
+                                conv_id=conversation_id,
                                 segment_id=segment.segment_id,
-                                delta=delta,
-                                offset=offset,
+                                seq=audio_seq,
+                                data_b64=b64,
+                                format="pcm_s16le",
+                                sample_rate=ai_agent.tts.sample_rate,
+                                channels=1,
+                                bits_per_sample=16,
                             ),
                         )
-                        delta_count += 1
+                        tts_last_chunk_sent_at[conversation_id] = datetime.now(
+                            timezone.utc
+                        )
+                        audio_seq += 1
+                    elif ev.name == "finished":
+                        await connection_manager.send_message(
+                            conversation_id,
+                            ServerMessage.audio_end(
+                                conv_id=conversation_id,
+                                segment_id=segment.segment_id,
+                                last_seq=max(0, audio_seq - 1),
+                            ),
+                        )
+                        break
 
-                        offset = end
-                        if offset < len(speech):
-                            await asyncio.sleep(tick_interval)
+                if interrupted:
+                    break
 
-                    logger.info(
-                        "[ws.transcript] done conv_id=%s segment_id=%s deltas=%s stopped=%s",
-                        conversation_id,
-                        segment.segment_id,
-                        delta_count,
-                        stop_event.is_set(),
-                    )
-
-                # Run TTS streaming and transcript pacer concurrently
-                await asyncio.gather(
-                    tts_stream_sender(),
-                    transcript_pacer(),
-                    return_exceptions=True,
-                )
-
-                # Send audio_end after TTS completes
-                if not await check_interrupt(conversation_id):
-                    await connection_manager.send_message(
-                        conversation_id,
-                        ServerMessage.audio_end(
-                            segment_id=segment.segment_id,
-                            total_chunks=audio_chunk_count,
-                        ),
-                    )
-
-            # Send board after audio ends (or immediately if no speech)
-            if segment.board and not await check_interrupt(conversation_id):
+            if segment.board and not interrupted:
                 logger.info(
                     "[ws.board] send conv_id=%s segment_id=%s board_len=%s",
                     conversation_id,
@@ -344,65 +348,130 @@ async def handle_text_message(
                 await connection_manager.send_message(
                     conversation_id,
                     ServerMessage.board(
+                        conv_id=conversation_id,
                         segment_id=segment.segment_id,
-                        board=segment.board,
+                        content=segment.board,
                     ),
                 )
 
             segment_count += 1
 
-        # Send done marker
         await connection_manager.send_message(
             conversation_id,
-            ServerMessage.done(total_segments=segment_count),
+            ServerMessage.done(
+                conv_id=conversation_id,
+                total_segments=segment_count,
+                reason="interrupted" if interrupted else "completed",
+            ),
         )
 
     except Exception as e:
-        logger.error(f"Error processing text message: {e}")
+        logger.error("Error processing text message: %s", e)
         await connection_manager.send_message(
             conversation_id,
-            ServerMessage.error(5001, f"处理消息时出错: {str(e)}"),
+            ServerMessage.error(conversation_id, 5001, f"处理消息时出错: {str(e)}"),
         )
 
-    # Send idle state
-    await send_state_change(conversation_id, ConversationState.IDLE)
+    await clear_interrupt(conversation_id)
+    await send_state_change(conversation_id, ConversationState.LISTENING)
 
 
-async def handle_audio_message(
+async def handle_client_hello(conversation_id: int, payload: dict) -> None:
+    await update_last_active(conversation_id)
+    audio = payload.get("audio") or {}
+    audio_configs[conversation_id] = AudioConfig(
+        format=audio.get("format", "pcm_s16le"),
+        sample_rate=int(audio.get("sample_rate", 16000)),
+        channels=int(audio.get("channels", 1)),
+        bits_per_sample=int(audio.get("bits_per_sample", 16)),
+        frame_ms=int(audio.get("frame_ms", 20)),
+    )
+
+
+async def handle_mic_start(conversation_id: int, stream_id: str) -> None:
+    await update_last_active(conversation_id)
+    current_stream_id[conversation_id] = stream_id
+    vad_states[conversation_id] = VADState()
+    await ensure_asr_session(conversation_id, stream_id)
+
+
+async def handle_user_audio_chunk(
     conversation_id: int,
-    audio_data: str,
-    sequence: int,
+    stream_id: str,
+    seq: int,
+    audio_b64: str,
+    vad_hint: Optional[str] = None,
 ) -> None:
-    """
-    Handle audio message from client using segment-based protocol.
-
-    Flow:
-    1. State: listening (when receiving first chunk)
-    2. Stream audio chunks to ASR
-    3. Emit partial transcripts while speaking
-    4. On end_speaking, finalize ASR and send to LLM
-    5. State: idle
-    """
     await update_last_active(conversation_id)
 
     try:
-        until = forced_end_until.get(conversation_id)
-        if until and datetime.now(timezone.utc) < until:
+        pcm_bytes = base64.b64decode(audio_b64)
+        config = _get_audio_config(conversation_id)
+        frame_ms = _estimate_frame_ms(pcm_bytes, config)
+        rms_db = _pcm_rms_db(pcm_bytes)
+        vad = _get_vad_state(conversation_id)
+
+        if conv_states.get(conversation_id) == ConversationState.LISTENING:
+            listening_since[conversation_id] = datetime.now(timezone.utc)
+
+        # Update noise floor slowly when near-silence
+        if rms_db < vad.noise_floor_db + 3:
+            vad.noise_floor_db = 0.98 * vad.noise_floor_db + 0.02 * rms_db
+        else:
+            vad.noise_floor_db = 0.995 * vad.noise_floor_db + 0.005 * rms_db
+
+        now = datetime.now(timezone.utc)
+        speaking_state = conv_states.get(conversation_id, ConversationState.IDLE)
+        last_tts = tts_last_chunk_sent_at.get(conversation_id)
+        recent_tts = (
+            last_tts is not None
+            and (now - last_tts).total_seconds() * 1000 < PLAYBACK_ECHO_WINDOW_MS
+        )
+        speaking_risk = speaking_state == ConversationState.SPEAKING or recent_tts
+
+        barge_in_triggered = False
+        if speaking_risk:
+            if rms_db > vad.noise_floor_db + BARGE_IN_DB_ABOVE_NOISE:
+                vad.barge_in_frames += 1
+            else:
+                vad.barge_in_frames = 0
+            if vad.barge_in_frames * frame_ms >= BARGE_IN_MIN_MS:
+                barge_in_triggered = True
+        else:
+            vad.barge_in_frames = 0
+
+        feed_asr = (not speaking_risk) or barge_in_triggered
+
+        if barge_in_triggered and speaking_state == ConversationState.SPEAKING:
+            logger.info("Barge-in detected conv_id=%s", conversation_id)
+            await handle_interrupt(conversation_id, reason="barge_in")
+
+        if not feed_asr:
             return
-        # Decode base64 audio data
-        pcm_bytes = base64.b64decode(audio_data)
-        queue = await ensure_asr_session(conversation_id)
-        # Sequence is accepted for client ordering but ASR streaming uses arrival order.
+
+        queue = await ensure_asr_session(conversation_id, stream_id)
         await queue.put(pcm_bytes)
 
+        # VAD endpointing (backend authoritative)
+        if rms_db > vad.noise_floor_db + SPEECH_DB_ABOVE_NOISE:
+            vad.in_speech = True
+            vad.silence_ms = 0.0
+        else:
+            if vad.in_speech:
+                vad.silence_ms += frame_ms
+                if vad.silence_ms >= END_SILENCE_MS:
+                    vad.in_speech = False
+                    vad.silence_ms = 0.0
+                    await queue.put(None)
+
     except Exception as e:
-        logger.error(f"Error processing audio message: {e}")
+        logger.error("Error processing audio message: %s", e)
         await stop_asr_session(conversation_id)
         await connection_manager.send_message(
             conversation_id,
-            ServerMessage.error(5001, f"音频处理出错: {str(e)}"),
+            ServerMessage.error(conversation_id, 5001, f"音频处理出错: {str(e)}"),
         )
-        await send_state_change(conversation_id, ConversationState.IDLE)
+        await send_state_change(conversation_id, ConversationState.LISTENING)
 
 
 async def handle_image_message(
@@ -427,7 +496,7 @@ async def handle_image_message(
     await store_message(conversation_id, "user", "image", image_url)
 
 
-async def handle_interrupt(conversation_id: int) -> None:
+async def handle_interrupt(conversation_id: int, reason: str = "user_tap") -> None:
     """
     Handle interrupt signal from client.
 
@@ -438,7 +507,7 @@ async def handle_interrupt(conversation_id: int) -> None:
     4. Cancel any pending LLM generation
     5. Reset state to idle
     """
-    logger.info(f"Interrupt received for conversation {conversation_id}")
+    logger.info("Interrupt received for conversation %s reason=%s", conversation_id, reason)
 
     # Set interrupt flag
     await redis_client.set(
@@ -461,15 +530,13 @@ async def handle_interrupt(conversation_id: int) -> None:
     await send_state_change(conversation_id, ConversationState.LISTENING)
 
 
-async def handle_end_speaking(conversation_id: int) -> None:
-    """Handle end of speaking signal, finalize ASR stream."""
+async def handle_mic_end(conversation_id: int, stream_id: str, last_seq: int) -> None:
     await update_last_active(conversation_id)
-
-    queue = asr_queues.get(conversation_id)
-    if not queue:
-        await send_state_change(conversation_id, ConversationState.IDLE)
+    if current_stream_id.get(conversation_id) != stream_id:
         return
-    await queue.put(None)
+    queue = asr_queues.get(conversation_id)
+    if queue:
+        await queue.put(None)
 
 
 async def check_interrupt(conversation_id: int) -> bool:
@@ -484,12 +551,20 @@ async def clear_interrupt(conversation_id: int) -> None:
     interrupt_flags[conversation_id] = False
 
 
-async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
+async def ensure_asr_session(conversation_id: int, stream_id: str) -> asyncio.Queue:
     """Ensure an ASR streaming session exists for this conversation."""
     task = asr_tasks.get(conversation_id)
-    if task and not task.done():
+    if (
+        task
+        and not task.done()
+        and current_stream_id.get(conversation_id) == stream_id
+    ):
         return asr_queues[conversation_id]
 
+    if task and not task.done():
+        await stop_asr_session(conversation_id)
+
+    current_stream_id[conversation_id] = stream_id
     await clear_interrupt(conversation_id)
     queue: asyncio.Queue = asyncio.Queue()
     asr_queues[conversation_id] = queue
@@ -505,54 +580,46 @@ async def ensure_asr_session(conversation_id: int) -> asyncio.Queue:
 
     async def asr_worker():
         final_text = ""
-        prev_text = ""
-        last_change_at = datetime.now(timezone.utc)
+        last_partial = ""
         try:
             async for result in ai_agent.asr.transcribe_stream(
                 audio_generator(),
                 interrupt_check=lambda: interrupt_flags.get(conversation_id, False),
             ):
                 text = (result.text or "").strip()
-                if text and text != prev_text:
+                if not text:
+                    continue
+                if result.is_final:
                     await connection_manager.send_message(
                         conversation_id,
-                        ServerMessage.transcript(text, is_final=False),
-                    )
-                if result.is_final and text:
-                    await connection_manager.send_message(
-                        conversation_id,
-                        ServerMessage.transcript(text, is_final=True),
+                        ServerMessage.asr_final(conversation_id, stream_id, text),
                     )
                     final_text = text
                     break
-                # If partial transcript is stable for a while, treat as end of speech.
-                now = datetime.now(timezone.utc)
-                if result.text != prev_text:
-                    prev_text = result.text
-                    last_change_at = now
-                else:
-                    elapsed = (now - last_change_at).total_seconds()
-                    if prev_text and elapsed >= PARTIAL_STABLE_SECONDS:
-                        final_text = prev_text
-                        await connection_manager.send_message(
-                            conversation_id,
-                            ServerMessage.transcript(final_text, is_final=True),
-                        )
-                        forced_end_until[conversation_id] = now + timedelta(seconds=FORCED_END_GRACE_SECONDS)
-                        queue.put_nowait(None)
-                        break
+                last_partial = text
+                await connection_manager.send_message(
+                    conversation_id,
+                    ServerMessage.asr_partial(conversation_id, stream_id, text),
+                )
 
-            if final_text:
+            if not final_text and last_partial:
+                await connection_manager.send_message(
+                    conversation_id,
+                    ServerMessage.asr_final(conversation_id, stream_id, last_partial),
+                )
+                final_text = last_partial
+
+            if final_text and not await check_interrupt(conversation_id):
                 await handle_text_message(conversation_id, final_text)
             else:
-                await send_state_change(conversation_id, ConversationState.IDLE)
+                await send_state_change(conversation_id, ConversationState.LISTENING)
         except Exception as e:
-            logger.error(f"ASR streaming error: {e}")
+            logger.error("ASR streaming error: %s", e)
             await connection_manager.send_message(
                 conversation_id,
-                ServerMessage.error(5001, f"语音识别出错: {str(e)}"),
+                ServerMessage.error(conversation_id, 5001, f"语音识别出错: {str(e)}"),
             )
-            await send_state_change(conversation_id, ConversationState.IDLE)
+            await send_state_change(conversation_id, ConversationState.LISTENING)
         finally:
             current_task = asyncio.current_task()
             if asr_tasks.get(conversation_id) is current_task:
@@ -575,6 +642,7 @@ async def stop_asr_session(conversation_id: int) -> None:
             await task
         except asyncio.CancelledError:
             pass
+    current_stream_id.pop(conversation_id, None)
 
 
 def check_listening_timeout(conversation_id: int) -> bool:
@@ -601,9 +669,9 @@ async def websocket_endpoint(
 
     URL: /ws/conversation/{conversation_id}?token={token}
 
-    Message Protocol:
-    - Client sends JSON: {"type": "audio|end_speaking|image|interrupt|ping", "data": {...}}
-    - Server sends JSON: {"type": "state|transcript|segment|audio|done|error|pong", "data": {...}}
+    Message Protocol (v2):
+    - Client sends JSON envelope: {type, conv_id, msg_id, ts_ms, payload}
+    - Server sends JSON envelope: {type, conv_id, msg_id, ts_ms, payload}
     """
     # Verify token and get user_id
     user_id = await verify_connection(websocket, conversation_id, token)
@@ -638,56 +706,98 @@ async def websocket_endpoint(
             except json.JSONDecodeError:
                 await connection_manager.send_message(
                     conversation_id,
-                    ServerMessage.error(1001, "Invalid JSON format"),
+                    ServerMessage.error(conversation_id, 1001, "Invalid JSON format"),
                 )
                 continue
 
             # Parse message
             try:
-                message = ClientMessage(**data)
+                message = WsEnvelope(**data)
             except Exception as e:
                 await connection_manager.send_message(
                     conversation_id,
-                    ServerMessage.error(1001, f"Invalid message format: {str(e)}"),
+                    ServerMessage.error(conversation_id, 1001, f"Invalid message format: {str(e)}"),
                 )
                 continue
 
+            if message.conv_id != conversation_id:
+                await connection_manager.send_message(
+                    conversation_id,
+                    ServerMessage.error(conversation_id, 1001, "Conversation ID mismatch"),
+                )
+                continue
+
+            payload = message.payload or {}
+
             # Route message by type
-            if message.type == ClientMessageType.PING:
+            if message.type == "ping":
                 pong = await handle_ping(conversation_id)
                 await connection_manager.send_message(conversation_id, pong)
 
-            elif message.type == ClientMessageType.AUDIO:
-                audio_data = message.get_audio_data()
-                if audio_data:
+            elif message.type == "client_hello":
+                await handle_client_hello(conversation_id, payload)
+
+            elif message.type == "mic_start":
+                stream_id = payload.get("stream_id")
+                if stream_id:
+                    await handle_mic_start(conversation_id, stream_id)
+                else:
+                    await connection_manager.send_message(
+                        conversation_id,
+                        ServerMessage.error(conversation_id, 1001, "Missing stream_id"),
+                    )
+
+            elif message.type == "user_audio_chunk":
+                stream_id = payload.get("stream_id")
+                audio_b64 = payload.get("data_b64")
+                seq = payload.get("seq")
+                if stream_id and audio_b64 is not None and seq is not None:
                     asyncio.create_task(
-                        handle_audio_message(
+                        handle_user_audio_chunk(
                             conversation_id,
-                            audio_data.audio,
-                            audio_data.sequence,
+                            stream_id,
+                            int(seq),
+                            audio_b64,
+                            payload.get("vad_hint"),
                         )
                     )
                 else:
                     await connection_manager.send_message(
                         conversation_id,
-                        ServerMessage.error(1001, "Missing audio data"),
+                        ServerMessage.error(conversation_id, 1001, "Missing audio chunk data"),
                     )
 
-            elif message.type == ClientMessageType.END_SPEAKING:
-                asyncio.create_task(handle_end_speaking(conversation_id))
-
-            elif message.type == ClientMessageType.IMAGE:
-                image_data = message.get_image_data()
-                if image_data:
-                    await handle_image_message(conversation_id, image_data.image_url)
+            elif message.type == "mic_end":
+                stream_id = payload.get("stream_id")
+                last_seq = payload.get("last_seq", 0)
+                if stream_id:
+                    asyncio.create_task(
+                        handle_mic_end(conversation_id, stream_id, int(last_seq))
+                    )
                 else:
                     await connection_manager.send_message(
                         conversation_id,
-                        ServerMessage.error(1001, "Missing image URL"),
+                        ServerMessage.error(conversation_id, 1001, "Missing stream_id"),
                     )
 
-            elif message.type == ClientMessageType.INTERRUPT:
+            elif message.type == "image":
+                image_url = payload.get("image_url")
+                if image_url:
+                    await handle_image_message(conversation_id, image_url)
+                else:
+                    await connection_manager.send_message(
+                        conversation_id,
+                        ServerMessage.error(conversation_id, 1001, "Missing image URL"),
+                    )
+
+            elif message.type == "interrupt":
                 await handle_interrupt(conversation_id)
+            else:
+                logger.warning(
+                    "Unknown ws message type conv_id=%s type=%s",
+                    conversation_id,
+                    message.type,
+                )
 
             # Check listening timeout (user interrupted but didn't speak for 1 minute)
             if check_listening_timeout(conversation_id):
@@ -704,7 +814,7 @@ async def websocket_endpoint(
         try:
             await connection_manager.send_message(
                 conversation_id,
-                ServerMessage.error(5001, f"Internal error: {str(e)}"),
+                ServerMessage.error(conversation_id, 5001, f"Internal error: {str(e)}"),
             )
         except Exception:
             pass
@@ -712,4 +822,8 @@ async def websocket_endpoint(
         # Clean up connection, ASR session, and listening state
         await stop_asr_session(conversation_id)
         listening_since.pop(conversation_id, None)
+        audio_configs.pop(conversation_id, None)
+        vad_states.pop(conversation_id, None)
+        conv_states.pop(conversation_id, None)
+        tts_last_chunk_sent_at.pop(conversation_id, None)
         await connection_manager.disconnect(conversation_id)

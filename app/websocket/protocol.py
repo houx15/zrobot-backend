@@ -1,235 +1,152 @@
-"""WebSocket message protocol definitions"""
+"""WebSocket message protocol definitions (v2 envelope)."""
 
-from pydantic import BaseModel
-from typing import Optional, Any, Literal
+from __future__ import annotations
+
+import uuid
 from datetime import datetime, timezone
 from enum import Enum
+from typing import Any, Dict, Optional
 
-
-class ClientMessageType(str, Enum):
-    """Client to server message types"""
-    AUDIO = "audio"
-    END_SPEAKING = "end_speaking"
-    IMAGE = "image"
-    INTERRUPT = "interrupt"
-    PING = "ping"
-
-
-class ServerMessageType(str, Enum):
-    """Server to client message types"""
-    AUDIO = "audio"
-    AUDIO_END = "audio_end"  # Signals end of audio for a segment
-    TRANSCRIPT = "transcript"
-    TRANSCRIPT_DELTA = "transcript_delta"  # Incremental speech text (typing effect)
-    SEGMENT = "segment"  # Full segment (speech + board) - legacy/fallback
-    SEGMENT_START = "segment_start"  # Segment begins (id + speech, no board yet)
-    BOARD = "board"  # Board content (sent after audio ends)
-    STATE = "state"  # Conversation state update
-    DONE = "done"
-    ERROR = "error"
-    PONG = "pong"
+from pydantic import BaseModel, Field
 
 
 class ConversationState(str, Enum):
-    """Conversation state machine states"""
+    """Conversation state machine states."""
+
     IDLE = "idle"
     LISTENING = "listening"
     PROCESSING = "processing"
     SPEAKING = "speaking"
 
 
-# Client -> Server message data models
-class AudioData(BaseModel):
-    """Audio message data"""
-    audio: str  # base64 encoded PCM s16le (16kHz, mono)
-    sequence: int
+def now_ms() -> int:
+    """UTC timestamp in milliseconds."""
+    return int(datetime.now(timezone.utc).timestamp() * 1000)
 
 
-class ClientMessage(BaseModel):
-    """Generic client message structure"""
-    type: ClientMessageType
-    data: Optional[dict] = None
-    timestamp: Optional[str] = None
-
-    def get_audio_data(self) -> Optional[AudioData]:
-        if self.type == ClientMessageType.AUDIO and self.data:
-            return AudioData(**self.data)
-        return None
-
-    def get_image_data(self) -> Optional["ImageData"]:
-        if self.type == ClientMessageType.IMAGE and self.data:
-            return ImageData(**self.data)
-        return None
+def new_msg_id() -> str:
+    return str(uuid.uuid4())
 
 
-class ImageData(BaseModel):
-    """Image message data"""
-    image_url: str
+class WsEnvelope(BaseModel):
+    """Unified message envelope."""
 
-# Server -> Client message data models
-class ServerAudioData(BaseModel):
-    """Server audio response data"""
-    audio: str  # base64 encoded audio
-    segment_id: int
-    is_final: bool = False
-    format: Optional[str] = None  # audio encoding, e.g. pcm/mp3
-    sample_rate: Optional[int] = None
-    channels: Optional[int] = None
-    bits_per_sample: Optional[int] = None
+    type: str
+    conv_id: int
+    msg_id: str
+    ts_ms: int
+    payload: Dict[str, Any] = Field(default_factory=dict)
 
 
-class TranscriptData(BaseModel):
-    """ASR transcript data"""
-    text: str
-    is_final: bool = False
+class ServerMessage:
+    """Server message factory helpers."""
 
-
-class ReplyTextData(BaseModel):
-    """LLM reply text data"""
-    content: str
-    is_final: bool = False
-
-
-class SegmentData(BaseModel):
-    """Speech + Board segment data"""
-    segment_id: int
-    speech: str  # Speech text for TTS
-    board: str  # Board markup content
-    # audio is sent separately via ServerMessage.audio
-
-
-class StateChangeData(BaseModel):
-    """Conversation state change data"""
-    state: str  # idle, listening, processing, speaking
-
-
-class ErrorData(BaseModel):
-    """Error message data"""
-    code: int
-    message: str
-
-
-class ServerMessage(BaseModel):
-    """Generic server message structure"""
-    type: ServerMessageType
-    data: Optional[dict] = None
-    timestamp: Optional[str] = None
-
-    def __init__(self, **kwargs):
-        if "timestamp" not in kwargs or kwargs["timestamp"] is None:
-            kwargs["timestamp"] = datetime.now(timezone.utc).isoformat()
-        super().__init__(**kwargs)
+    @staticmethod
+    def _make(conv_id: int, msg_type: str, payload: Optional[dict] = None) -> WsEnvelope:
+        return WsEnvelope(
+            type=msg_type,
+            conv_id=conv_id,
+            msg_id=new_msg_id(),
+            ts_ms=now_ms(),
+            payload=payload or {},
+        )
 
     @classmethod
-    def audio(
+    def state(cls, conv_id: int, state: str, detail: Optional[str] = None) -> WsEnvelope:
+        payload = {"state": state}
+        if detail:
+            payload["detail"] = detail
+        return cls._make(conv_id, "state", payload)
+
+    @classmethod
+    def asr_partial(
+        cls, conv_id: int, stream_id: str, text: str, stability: Optional[float] = None
+    ) -> WsEnvelope:
+        payload = {"stream_id": stream_id, "text": text}
+        if stability is not None:
+            payload["stability"] = stability
+        return cls._make(conv_id, "asr_partial", payload)
+
+    @classmethod
+    def asr_final(cls, conv_id: int, stream_id: str, text: str) -> WsEnvelope:
+        return cls._make(conv_id, "asr_final", {"stream_id": stream_id, "text": text})
+
+    @classmethod
+    def segment_start(cls, conv_id: int, segment_id: int, index: int) -> WsEnvelope:
+        return cls._make(
+            conv_id, "segment_start", {"segment_id": segment_id, "index": index}
+        )
+
+    @classmethod
+    def ai_text_delta(
+        cls, conv_id: int, segment_id: int, seq: int, delta: str
+    ) -> WsEnvelope:
+        return cls._make(
+            conv_id,
+            "ai_text_delta",
+            {"segment_id": segment_id, "seq": seq, "delta": delta},
+        )
+
+    @classmethod
+    def audio_chunk(
         cls,
-        audio_data: str,
+        conv_id: int,
         segment_id: int,
-        is_final: bool = False,
-        seq: Optional[int] = None,
-        format: Optional[str] = None,
-        sample_rate: Optional[int] = None,
-        channels: Optional[int] = None,
-        bits_per_sample: Optional[int] = None,
-    ) -> "ServerMessage":
-        """Create audio message"""
-        data = {
-            "audio": audio_data,
-            "segment_id": segment_id,
-            "is_final": is_final,
-            "format": format,
-            "sample_rate": sample_rate,
-            "channels": channels,
-            "bits_per_sample": bits_per_sample,
-        }
-        if seq is not None:
-            data["seq"] = seq
-        return cls(type=ServerMessageType.AUDIO, data=data)
-
-    @classmethod
-    def audio_end(cls, segment_id: int, total_chunks: int) -> "ServerMessage":
-        """Create audio end message - signals end of audio for a segment"""
-        return cls(
-            type=ServerMessageType.AUDIO_END,
-            data={"segment_id": segment_id, "total_chunks": total_chunks},
-        )
-
-    @classmethod
-    def transcript(cls, content: str, is_final: bool = False) -> "ServerMessage":
-        """Create transcript message (ASR result)"""
-        return cls(
-            type=ServerMessageType.TRANSCRIPT,
-            data={"text": content, "is_final": is_final},
-        )
-
-    @classmethod
-    def transcript_delta(
-        cls, segment_id: int, delta: str, offset: int
-    ) -> "ServerMessage":
-        """Create transcript delta message - incremental speech text for typing effect"""
-        return cls(
-            type=ServerMessageType.TRANSCRIPT_DELTA,
-            data={"segment_id": segment_id, "delta": delta, "offset": offset},
-        )
-
-    @classmethod
-    def segment(
-        cls,
-        segment_id: int,
-        speech: str,
-        board: str,
-    ) -> "ServerMessage":
-        """Create full segment message with speech + board content (legacy/fallback)"""
-        return cls(
-            type=ServerMessageType.SEGMENT,
-            data={
+        seq: int,
+        data_b64: str,
+        format: str,
+        sample_rate: int,
+        channels: int,
+        bits_per_sample: int,
+    ) -> WsEnvelope:
+        return cls._make(
+            conv_id,
+            "audio_chunk",
+            {
                 "segment_id": segment_id,
-                "speech": speech,
-                "board": board,
+                "seq": seq,
+                "format": format,
+                "sample_rate": sample_rate,
+                "channels": channels,
+                "bits_per_sample": bits_per_sample,
+                "data_b64": data_b64,
             },
         )
 
     @classmethod
-    def segment_start(cls, segment_id: int, speech: str) -> "ServerMessage":
-        """Create segment start message - begins a segment, board sent later"""
-        return cls(
-            type=ServerMessageType.SEGMENT_START,
-            data={"segment_id": segment_id, "speech": speech},
+    def audio_end(cls, conv_id: int, segment_id: int, last_seq: int) -> WsEnvelope:
+        return cls._make(
+            conv_id, "audio_end", {"segment_id": segment_id, "last_seq": last_seq}
         )
 
     @classmethod
-    def board(cls, segment_id: int, board: str) -> "ServerMessage":
-        """Create board message - sent after audio ends"""
-        return cls(
-            type=ServerMessageType.BOARD,
-            data={"segment_id": segment_id, "board": board},
+    def board(
+        cls, conv_id: int, segment_id: int, content: str, format: str = "md"
+    ) -> WsEnvelope:
+        return cls._make(
+            conv_id,
+            "board",
+            {"segment_id": segment_id, "format": format, "content": content},
         )
 
     @classmethod
-    def state(cls, state: str) -> "ServerMessage":
-        """Create state message"""
-        return cls(
-            type=ServerMessageType.STATE,
-            data={"state": state},
+    def done(
+        cls, conv_id: int, total_segments: int, reason: str = "completed"
+    ) -> WsEnvelope:
+        return cls._make(
+            conv_id, "done", {"total_segments": total_segments, "reason": reason}
         )
 
     @classmethod
-    def done(cls, total_segments: int) -> "ServerMessage":
-        """Create done message"""
-        return cls(
-            type=ServerMessageType.DONE,
-            data={"total_segments": total_segments},
+    def error(
+        cls, conv_id: int, code: int, message: str, retryable: bool = False
+    ) -> WsEnvelope:
+        return cls._make(
+            conv_id,
+            "error",
+            {"code": code, "message": message, "retryable": retryable},
         )
 
     @classmethod
-    def error(cls, code: int, message: str) -> "ServerMessage":
-        """Create error message"""
-        return cls(
-            type=ServerMessageType.ERROR,
-            data={"code": code, "message": message},
-        )
-
-    @classmethod
-    def pong(cls) -> "ServerMessage":
-        """Create pong message"""
-        return cls(type=ServerMessageType.PONG, data={})
+    def pong(cls, conv_id: int) -> WsEnvelope:
+        return cls._make(conv_id, "pong", {})

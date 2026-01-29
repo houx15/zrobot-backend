@@ -10,7 +10,8 @@ import json
 import logging
 import struct
 import uuid
-from typing import AsyncGenerator, Callable, Optional
+from typing import AsyncGenerator, Callable, Optional, Literal
+from dataclasses import dataclass
 
 import websockets
 
@@ -23,6 +24,17 @@ from app.services.volc_tts_protocol import (
 )
 
 logger = logging.getLogger(__name__)
+
+
+TTSEventName = Literal["sentence_start", "sentence_end", "audio", "finished"]
+
+
+@dataclass
+class TTSEvent:
+    name: TTSEventName
+    text: Optional[str] = None
+    audio: Optional[bytes] = None
+    meta: Optional[dict] = None
 
 
 def _detect_audio_format(data: bytes) -> Optional[str]:
@@ -193,6 +205,120 @@ class TTSService:
                             except Exception:
                                 err = ""
                         raise RuntimeError(f"TTS error (code {msg.error_code}): {err}")
+
+        except Exception as e:
+            logger.error(f"TTS stream error: {e}")
+            raise
+
+    async def synthesize_stream_events(
+        self,
+        text: str,
+        speed_ratio: float = 1.0,
+        volume_ratio: float = 1.0,
+        interrupt_check: Optional[Callable[[], bool]] = None,
+    ) -> AsyncGenerator[TTSEvent, None]:
+        """
+        Stream synthesize speech events from text.
+
+        Yields:
+            TTSEvent: sentence_start/sentence_end/audio/finished
+        """
+        if not self.app_id or not self.access_token:
+            logger.error("TTS service not configured")
+            return
+
+        headers = {
+            "X-Api-App-Key": self.app_id,
+            "X-Api-Access-Key": self.access_token,
+            "X-Api-Resource-Id": self._get_resource_id(),
+            "X-Api-Connect-Id": str(uuid.uuid4()),
+        }
+
+        try:
+            async with websockets.connect(
+                self.WS_URL, extra_headers=headers, max_size=10 * 1024 * 1024
+            ) as websocket:
+                request = {
+                    "user": {"uid": str(uuid.uuid4())},
+                    "req_params": {
+                        "speaker": self.voice_type,
+                        "audio_params": {
+                            "format": "pcm",
+                            "sample_rate": self.sample_rate,
+                            "enable_timestamp": False,
+                        },
+                        "text": text,
+                        "speed_ratio": speed_ratio,
+                        "volume_ratio": volume_ratio,
+                        "additions": json.dumps(
+                            {"disable_markdown_filter": False}
+                        ),
+                    },
+                }
+
+                await full_client_request(websocket, json.dumps(request).encode())
+
+                while True:
+                    if interrupt_check and interrupt_check():
+                        logger.info("TTS interrupted by user")
+                        break
+
+                    try:
+                        msg = await asyncio.wait_for(
+                            receive_message(websocket), timeout=30.0
+                        )
+                    except asyncio.TimeoutError:
+                        logger.warning("TTS receive timeout")
+                        break
+
+                    if msg.type == MsgType.FullServerResponse:
+                        if msg.event == EventType.TTSSentenceStart:
+                            sent_text = ""
+                            if msg.payload:
+                                try:
+                                    obj = json.loads(
+                                        msg.payload.decode("utf-8", "ignore")
+                                    )
+                                    sent_text = (
+                                        obj.get("res_params", {}).get("text")
+                                        or obj.get("res_params.text")
+                                        or ""
+                                    )
+                                except Exception:
+                                    sent_text = msg.payload.decode(
+                                        "utf-8", "ignore"
+                                    )
+                            yield TTSEvent(name="sentence_start", text=sent_text)
+                        elif msg.event == EventType.TTSSentenceEnd:
+                            yield TTSEvent(name="sentence_end")
+                        elif msg.event == EventType.SessionFinished:
+                            meta = None
+                            if msg.payload:
+                                try:
+                                    meta = json.loads(
+                                        msg.payload.decode("utf-8", "ignore")
+                                    )
+                                except Exception:
+                                    meta = {
+                                        "raw": msg.payload.decode("utf-8", "ignore")
+                                    }
+                            yield TTSEvent(name="finished", meta=meta or {})
+                            break
+                        else:
+                            _log_server_message(msg)
+                    elif msg.type == MsgType.AudioOnlyServer:
+                        if msg.payload:
+                            yield TTSEvent(name="audio", audio=msg.payload)
+                    elif msg.type == MsgType.Error:
+                        err = ""
+                        if msg.payload:
+                            try:
+                                err = msg.payload.decode("utf-8", "ignore")
+                            except Exception:
+                                err = ""
+                        raise RuntimeError(
+                            f"TTS error (code {msg.error_code}): {err}"
+                        )
 
         except Exception as e:
             logger.error(f"TTS stream error: {e}")

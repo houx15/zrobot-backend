@@ -2,11 +2,10 @@
 
 from typing import Dict, Optional
 from fastapi import WebSocket
-import json
 import asyncio
 from datetime import datetime, timezone
 
-from app.websocket.protocol import ServerMessage
+from app.websocket.protocol import WsEnvelope
 from app.redis_client import redis_client
 
 
@@ -97,7 +96,7 @@ class ConnectionManager:
     async def send_message(
         self,
         conversation_id: int,
-        message: ServerMessage,
+        message: WsEnvelope,
     ) -> bool:
         """
         Send a message to a specific conversation.
@@ -155,7 +154,7 @@ class ConnectionManager:
                 return False
         return False
 
-    async def broadcast_to_all(self, message: ServerMessage) -> None:
+    async def broadcast_to_all(self, message: WsEnvelope) -> None:
         """
         Broadcast a message to all active connections.
         """
